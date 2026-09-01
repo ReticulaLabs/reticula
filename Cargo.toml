@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "crates/reticula-hal",
+    "crates/reticula-ui",
+    "crates/reticula-lxmf",
+    "crates/reticula-nomad",
+    "crates/reticula-app",
+    "crates/reticula-host",
+    "sim",
+]
+
+# ESP32-only crates are kept out of the default build so that a plain
+# `cargo check`/`cargo build` works on a host machine without the Xtensa
+# toolchain. Build them explicitly for the ESP32-S3, see tools/build-esp32.sh.
+exclude = [
+    "crates/reticula-tdeck",
+    "firmware",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/kallisti5/reticula"
+rust-version = "1.85"
+
+[workspace.dependencies]
+reticulum-sdk = "2.2"
+embedded-graphics = "0.8"
+
+tokio = { version = "1.53", features = ["full"] }
+getrandom = { version = "0.4", features = ["sys_rng"] }
+rand_core = "0.10"
+
+serde = { version = "1.0", features = ["derive"] }
+rmp-serde = "1.3"
+serde_bytes = "0.11"
+
+log = "0.4"
+
+# Common build tweaks for all workspace crates.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

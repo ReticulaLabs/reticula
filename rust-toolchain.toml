@@ -1,0 +1,5 @@
+[toolchain]
+# Stable toolchain for host development (workspace default members).
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

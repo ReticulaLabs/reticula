@@ -1,0 +1,16 @@
+[package]
+name = "reticula-ui"
+description = "Small embedded-graphics user interface for Reticula"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+embedded-graphics = "0.8"
+reticula-hal = { path = "../reticula-hal" }
+reticula-nomad = { path = "../reticula-nomad" }
+
+[lints]
+workspace = true

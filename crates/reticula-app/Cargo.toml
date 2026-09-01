@@ -1,0 +1,23 @@
+[package]
+name = "reticula-app"
+description = "Application layer for Reticula: wires a board, the UI and the Reticulum clients together"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+reticulum-sdk.workspace = true
+reticula-hal = { path = "../reticula-hal" }
+reticula-ui = { path = "../reticula-ui" }
+reticula-lxmf = { path = "../reticula-lxmf" }
+reticula-nomad = { path = "../reticula-nomad" }
+
+tokio.workspace = true
+getrandom.workspace = true
+rand_core.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true

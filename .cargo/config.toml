@@ -1,0 +1,8 @@
+# Host builds need no special configuration. This file only carries the
+# aliases used when targeting the ESP32-S3 with the esp-idf toolchain.
+#
+# The Xtensa rust target (`xtensa-esp32s3-espidf`) is installed with `espup`;
+# see tools/build-esp32.sh and docs/architecture.md.
+
+[alias]
+build-esp32 = "build --target xtensa-esp32s3-espidf --release"

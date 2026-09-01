@@ -1,0 +1,18 @@
+[package]
+name = "reticula-nomad"
+description = "NomadNet browser client for Reticula, built on the Rust Reticulum SDK"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+reticulum-sdk.workspace = true
+tokio.workspace = true
+rmpv = { version = "1.3", features = ["with-serde"] }
+sha2 = "0.10"
+log.workspace = true
+
+[lints]
+workspace = true

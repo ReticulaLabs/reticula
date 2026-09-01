@@ -1,0 +1,16 @@
+# ESP-IDF defaults for the T-Deck firmware.
+# Build with tools/build-esp32.sh (which boots the esp-idf environment).
+
+# Give the main task enough stack (we run tokio on it).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=12288
+
+# 1 kHz tick is friendlier for tokio timing.
+CONFIG_FREERTOS_HZ=1000
+
+# PSRAM (8 MB OPI on the T-Deck) is used for Rust heap allocations.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# 16 MB flash partition scheme.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y

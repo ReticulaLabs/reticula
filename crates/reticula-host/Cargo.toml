@@ -1,0 +1,20 @@
+[package]
+name = "reticula-host"
+description = "Host simulator BSP for Reticula: renders the UI to a terminal and reads the keyboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+reticula-hal = { path = "../reticula-hal" }
+embedded-graphics = "0.8"
+crossterm = "0.28"
+
+[dev-dependencies]
+reticula-ui = { path = "../reticula-ui" }
+reticula-nomad = { path = "../reticula-nomad" }
+
+[lints]
+workspace = true
