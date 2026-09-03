@@ -17,6 +17,10 @@ it is a good citizen on a low-memory device and cheap on the mesh.
 * **NomadNet browser** — discover `nomadnetwork/node` destinations, fetch
   pages over links and render Micron markup (headings, emphasis, links) on
   screen.
+* **LoRa radio** (T-Deck SX1262) — an optional LoRa interface joins the mesh
+  over the radio, alongside WiFi/UDP. `reticulum-sdk` v2.3 supports LoRa
+  chipsets over Linux `spidev`/`gpio-cdev` *or* an `embedded-hal` SPI + GPIO
+  backend (see `third_party/README.md`).
 * **Modular hardware abstraction** — display, keyboard and board are traits in
   `reticula-hal`; any device is a new BSP crate. Two ship today:
   * `reticula-host` — a **desktop terminal simulator** so the whole UI can be
@@ -49,12 +53,26 @@ tokio. Install the toolchain, then:
 ```bash
 cargo install espup && espup install && . "$HOME/export-esp.sh"
 
+# build only
+tools/build-esp32.sh
+
+# build + flash to the T-Deck over USB (optional LoRa radio)
 WIFI_SSID=MyNet WIFI_PASS=secret RNS_PEER=192.168.1.10:5238 \
+LORA_FREQ=868000000 \
   tools/build-esp32.sh --flash
 ```
 
+`LORA_FREQ` (Hz) enables the SX1262 LoRa interface (also settable:
+`LORA_BW`, `LORA_TXPOWER`, `LORA_SF`, `LORA_CR`). Without it, the radio is
+left unused.
+
+The firmware builds against `reticulum-sdk` v2.3 (which gained the embedded
+support upstream) and a vendored fork of `embuild` (`third_party/`, a bindgen
+bump needed for ESP-IDF bindings with modern clang), wired in via
+`[patch.crates-io]`. See `third_party/README.md` for details.
+
 See [docs/architecture.md](docs/architecture.md) for details on the ESP32
-toolchain and a small `reticulum-sdk` packaging note.
+toolchain and the embedded support changes.
 
 ## Repository layout
 

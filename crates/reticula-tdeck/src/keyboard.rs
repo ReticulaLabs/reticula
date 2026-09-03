@@ -42,7 +42,9 @@ impl Keyboard for TdeckKeyboard<'_> {
         let mut n = 0;
         for slot in events.iter_mut() {
             let mut byte = [0u8; 1];
-            match self.i2c.read(KEYBOARD_I2C_ADDRESS, &mut byte) {
+            // 100 ms per transaction keeps the poll responsive without
+            // blocking the UI loop for long.
+            match self.i2c.read(KEYBOARD_I2C_ADDRESS, &mut byte, 100) {
                 Ok(_) => {
                     if byte[0] == 0x00 {
                         break; // no more keys queued

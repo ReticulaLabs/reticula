@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{info, warn};
 
@@ -179,6 +179,7 @@ impl<B: Board> ReticulaApp<B> {
         self.shared.connected.store(true, Ordering::Relaxed);
 
         let mut key_events = [KeyEvent::pressed(KeyCode::Unknown(0)); 16];
+        let mut last_heartbeat = Instant::now();
         while !self.quit {
             // Input.
             let n = self.board.keyboard().read(&mut key_events);
@@ -199,6 +200,18 @@ impl<B: Board> ReticulaApp<B> {
 
             // Render.
             self.render();
+
+            // Periodic heartbeat so a connected serial monitor shows the app
+            // is alive and healthy.
+            if last_heartbeat.elapsed() >= Duration::from_secs(10) {
+                log::info!(
+                    "reticula: alive uptime={}s links={} msgs={}",
+                    self.board.uptime_ms() / 1000,
+                    self.shared.peer_links.load(Ordering::Relaxed),
+                    self.store.lock().unwrap().len(),
+                );
+                last_heartbeat = Instant::now();
+            }
 
             tokio::time::sleep(Duration::from_millis(FRAME_MS)).await;
         }
@@ -459,6 +472,10 @@ async fn build_transport(
     config.set_reroute_eager(false);
     config.set_respond_to_probes(false);
     config.set_announce_forever(true);
+    // The SDK default of 16384 pre-allocates ~8.6 MB per broadcast channel
+    // (7 channels), which exceeds the T-Deck's 8 MB PSRAM. The end-client is
+    // low-throughput, so a small ring is plenty.
+    config.set_event_channel_capacity(512);
 
     let mut transport = Transport::new(config);
 
@@ -483,6 +500,23 @@ async fn build_transport(
         }
         crate::TransportKind::None => {
             info!("reticulum: no network interface configured (offline)");
+        }
+    }
+
+    // Optional LoRa radio interface (e.g. an SX1262 on the T-Deck). The config
+    // carries its embedded-hal hardware provider.
+    #[cfg(feature = "lora")]
+    {
+        use reticulum_sdk::iface::lora::LoRaInterface;
+        use reticulum_sdk::iface::lora::sx1262::SX1262;
+        if let Some(lora) = &net.lora {
+            let iface = LoRaInterface::<SX1262>::new(lora.clone());
+            transport
+                .iface_manager()
+                .lock()
+                .await
+                .spawn(iface, LoRaInterface::spawn);
+            info!("reticulum: LoRa interface configured");
         }
     }
 

@@ -14,7 +14,13 @@ use mipidsi::interface::Interface;
 use mipidsi::models::Model;
 
 /// Display wrapper over a `mipidsi::Display`.
-pub struct TdeckScreen<DI, MODEL, RST> {
+pub struct TdeckScreen<DI, MODEL, RST>
+where
+    DI: Interface,
+    MODEL: Model,
+    RST: embedded_hal::digital::OutputPin,
+    MODEL::ColorFormat: mipidsi::interface::InterfacePixelFormat<DI::Word>,
+{
     inner: mipidsi::Display<DI, MODEL, RST>,
     size: Size,
 }
@@ -23,6 +29,7 @@ impl<DI, MODEL, RST> TdeckScreen<DI, MODEL, RST>
 where
     DI: Interface,
     MODEL: Model,
+    RST: embedded_hal::digital::OutputPin,
     MODEL::ColorFormat: mipidsi::interface::InterfacePixelFormat<DI::Word>,
 {
     /// Wrap a fully initialised `mipidsi::Display`.
@@ -40,6 +47,7 @@ impl<DI, MODEL, RST> DrawTarget for TdeckScreen<DI, MODEL, RST>
 where
     DI: Interface,
     MODEL: Model,
+    RST: embedded_hal::digital::OutputPin,
     MODEL::ColorFormat: mipidsi::interface::InterfacePixelFormat<DI::Word>,
     MODEL::ColorFormat: From<Rgb565> + Into<Rgb565>,
 {
@@ -50,8 +58,8 @@ where
     where
         I: IntoIterator<Item = Pixel<Self::Color>>,
     {
-        self.inner.draw_iter(pixels.map(|p| {
-            let (pos, color) = p.into();
+        self.inner.draw_iter(pixels.into_iter().map(|p| {
+            let Pixel(pos, color) = p;
             Pixel(pos, color.into())
         }))
     }
@@ -85,6 +93,7 @@ impl<DI, MODEL, RST> OriginDimensions for TdeckScreen<DI, MODEL, RST>
 where
     DI: Interface,
     MODEL: Model,
+    RST: embedded_hal::digital::OutputPin,
     MODEL::ColorFormat: mipidsi::interface::InterfacePixelFormat<DI::Word>,
 {
     fn size(&self) -> Size {
@@ -96,6 +105,7 @@ impl<DI, MODEL, RST> reticula_hal::Display for TdeckScreen<DI, MODEL, RST>
 where
     DI: Interface,
     MODEL: Model,
+    RST: embedded_hal::digital::OutputPin,
     MODEL::ColorFormat: mipidsi::interface::InterfacePixelFormat<DI::Word>,
     MODEL::ColorFormat: From<Rgb565> + Into<Rgb565>,
 {

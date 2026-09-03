@@ -19,5 +19,10 @@ getrandom.workspace = true
 rand_core.workspace = true
 log.workspace = true
 
+[features]
+# LoRa radio interface (e.g. SX1262) support. Enables the vendored SDK's
+# `lora` feature. Off by default so the desktop simulator doesn't build it.
+lora = ["reticulum-sdk/lora"]
+
 [lints]
 workspace = true

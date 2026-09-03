@@ -17,6 +17,9 @@ members = [
 exclude = [
     "crates/reticula-tdeck",
     "firmware",
+    # Vendored fork of embuild with a bindgen bump; built only through the
+    # firmware (via [patch.crates-io]).
+    "third_party/embuild",
 ]
 
 [workspace.package]
@@ -27,10 +30,16 @@ repository = "https://github.com/kallisti5/reticula"
 rust-version = "1.85"
 
 [workspace.dependencies]
-reticulum-sdk = "2.2"
+# v2.3.0 gained upstream embedded support: the `serial`/`lora` interfaces are
+# feature-gated, 64-bit counters use portable-atomic, and tokio uses a slimmed
+# feature set. Default features (which include the Linux LoRa backend) are
+# disabled here; `lora` is enabled on-demand via reticula-app's `lora` feature.
+reticulum-sdk = { version = "2.3", default-features = false, features = ["alloc"] }
 embedded-graphics = "0.8"
 
-tokio = { version = "1.53", features = ["full"] }
+# Targeted tokio features: `signal`/`process` pull in signal-hook-registry,
+# which does not build on the ESP-IDF target.
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 getrandom = { version = "0.4", features = ["sys_rng"] }
 rand_core = "0.10"
 
@@ -49,3 +58,7 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# The vendored fork of embuild (bindgen bump for clang >= 21) is used by the
+# whole workspace via the firmware's build. It is only wired in from
+# firmware/Cargo.toml; no workspace-wide patch is needed here.

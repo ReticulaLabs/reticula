@@ -1,6 +1,6 @@
-use embuild::espidf;
+use embuild::espidf::sysenv;
 
 fn main() {
-    espidf::sysenv().unwrap();
+    sysenv::output();
     println!("cargo:rustc-cfg=esp_idf");
 }

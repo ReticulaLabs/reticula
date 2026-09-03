@@ -165,15 +165,32 @@ Firmware configuration is supplied at build time:
 | `WIFI_PASS` | Station password.                                |
 | `RNS_PEER`  | `host:port` Reticulum node to peer with (optional). |
 
-### `reticulum-sdk` packaging note
+### Embedded support
 
-`reticulum-sdk` currently declares `gpio-cdev` (Linux GPIO, used only by the
-host-side LoRa path) as an unconditional dependency. On the ESP-IDF target
-this can fail to build. Until it is made optional upstream,
-`tools/patch-reticulum-sdk.sh` vendors the crate and gates those modules
-behind features (`serial`, `lora-linux-gpio`) that the firmware keeps off.
-Wire it up with a `[patch.crates-io]` entry in `firmware/Cargo.toml` if your
-toolchain needs it.
+`reticulum-sdk` v2.3 gained the embedded/ESP32 support upstream: the
+serial/LoRa interfaces (`serial`, `rnode`, `kiss`, `lora`) are feature-gated
+so their `tokio-serial`/`serialport` and Linux-only `gpio-cdev` dependencies
+drop out of embedded builds; `AtomicU64` uses `portable-atomic` (no hardware
+64-bit CAS on the ESP32-S3); the tokio feature set is slimmed; and the LoRa
+interface supports an `embedded-hal` SPI + GPIO backend. The project uses it
+directly from crates.io with `default-features = false`.
+
+The one remaining vendored fork is `embuild` (`third_party/`, wired in via
+`[patch.crates-io]` in `firmware/Cargo.toml`): it bumps `bindgen` to 0.72 —
+bindgen < 0.72.1 emits broken bindings (`_address` placeholder structs) with
+clang ≥ 21, which breaks `esp-idf-sys` bindings on systems with a modern
+system libclang.
+
+`tools/build-esp32.sh` also points `bindgen` at the `esp-clang` bundled with
+the toolchain (`LIBCLANG_PATH`) as a further safeguard.
+
+### LoRa on the T-Deck
+
+The T-Deck's SX1262 (CS=9, BUSY=13, RST=17, DIO1=45) shares the SPI2 bus with
+the LCD. `reticula-tdeck` exposes the radio through `TDeckBoard::lora_hw()` (an
+`embedded-hal`-based `LoRaHwProvider`); `reticula-app`'s `lora` feature spawns
+a `LoRaInterface<SX1262>` when `NetConfig::lora` is set. The firmware enables
+it at build time with `LORA_FREQ=<hz>`.
 
 ### Memory
 
@@ -181,6 +198,33 @@ The T-Deck has 8 MB of PSRAM and 512 KB of on-chip SRAM. The firmware
 `profile.release` is tuned for size (`opt-level = "s"`, `lto`, `panic = "abort"`).
 Large allocations (the LXMF SPI buffer, page data, store) should live in
 PSRAM; the `sdkconfig.defaults` enables `SPIRAM_USE_MALLOC`.
+
+### Runtime bring-up on the ESP32-S3
+
+Getting the SDK to run on-device took several ESP-IDF-specific fixes:
+
+* **OPI PSRAM**: the T-Deck's 8 MB PSRAM is octal, so `sdkconfig.defaults`
+  sets `CONFIG_SPIRAM_MODE_OCT=y` + `CONFIG_SPIRAM_SPEED_80M=y`. Without it,
+  `cpu_start` aborts with "Failed to init external RAM!".
+* **Console**: `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y` routes `log` output to
+  the native USB-Serial-JTAG (this T-Deck has no separate USB-UART bridge).
+* **`eventfd` VFS**: the tokio IO driver calls `eventfd()`, which ESP-IDF
+  provides via a VFS that must be registered first. `main()` calls
+  `esp_vfs_eventfd_register()` before building the runtime, otherwise the
+  build fails with `EACCES`.
+* **lwIP without WiFi**: `main()` calls `esp_netif_init()` unconditionally.
+  Otherwise the UDP interface hits `tcpip_send_msg_wait_sem: Invalid mbox`
+  because the tcpip thread is only started by WiFi init.
+* **Stacks**: `CONFIG_ESP_MAIN_TASK_STACK_SIZE=65536` for the `app_main`
+  task (the SDK init overflows 32 KB) and `thread_stack_size(65536)` for the
+  tokio worker threads (the transport task overflows the 8 KB pthread
+  default).
+* **Broadcast channels**: `TransportConfig::set_event_channel_capacity(512)`.
+  The SDK default of 16384 pre-allocates ~8.6 MB *per channel* (7 channels),
+  which exceeds the 8 MB PSRAM.
+* **Resetting to boot**: the T-Deck's auto-reset strap leaves the chip in
+  download mode after a DTR/RTS reset, so `tools/build-esp32.sh` flashes with
+  `--after watchdog-reset` (the app then boots normally).
 
 ## Roadmap notes
 

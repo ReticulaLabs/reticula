@@ -1,26 +1,28 @@
 [package]
 name = "reticula-tdeck"
 description = "LILYGO T-Deck (ESP32-S3) board support package for Reticula"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
-rust-version.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/kallisti5/reticula"
+rust-version = "1.85"
+
+# NOTE: This crate is excluded from the workspace root (see ../Cargo.toml) so
+# host builds never try to compile the Xtensa-only code. Because it builds
+# standalone, it cannot use `x.workspace = true` inheritance; dependencies are
+# pinned here directly.
 
 [build-dependencies]
-embuild = "0.31"
+embuild = { version = "0.31", features = ["espidf"] }
 
 [dependencies]
 reticula-hal = { path = "../reticula-hal" }
+reticulum-sdk = { version = "2.3", default-features = false, features = ["alloc", "lora"] }
 embedded-graphics = "0.8"
 mipidsi = "0.10"
+embedded-hal = "1.0"
 
-esp-idf-hal = "0.44"
-esp-idf-svc = "0.51"
-esp-idf-sys = { version = "0.35", features = ["binstart"] }
-esp-idf-sys-macro = "0.3"
+esp-idf-hal = "0.45"
+esp-idf-sys = { version = "0.36", features = ["binstart"] }
 
-log.workspace = true
-
-[lints]
-workspace = true
+log = "0.4"

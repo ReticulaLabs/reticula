@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+
 /// How the device connects to the mesh.
 ///
 /// Reticula is a pure end client: it never acts as a transport, so it only
@@ -35,6 +36,12 @@ pub struct NetConfig {
     /// Whether pressing back on the home screen exits the application.
     /// True on the desktop simulator, false on a device.
     pub quit_on_root_back: bool,
+    /// Optional LoRa radio interface (e.g. an SX1262 on the T-Deck), enabled
+    /// with the `lora` feature. The config carries an embedded-hal hardware
+    /// provider (`LoRaConfig::with_embedded_hw`); when set, a LoRa interface
+    /// is added to the transport alongside the network transport.
+    #[cfg(feature = "lora")]
+    pub lora: Option<reticulum_sdk::iface::lora::LoRaConfig>,
 }
 
 impl Default for NetConfig {
@@ -43,6 +50,8 @@ impl Default for NetConfig {
             transport: TransportKind::None,
             announce_interval: Duration::from_secs(300),
             quit_on_root_back: false,
+            #[cfg(feature = "lora")]
+            lora: None,
         }
     }
 }
