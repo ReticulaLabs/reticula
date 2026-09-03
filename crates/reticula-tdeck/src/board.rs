@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use esp_idf_hal::delay::Ets;
-use esp_idf_hal::gpio::{Gpio11, Gpio12, Gpio13, Gpio17, Gpio45, Input, Output, PinDriver};
+use esp_idf_hal::gpio::{
+    Gpio10, Gpio11, Gpio12, Gpio13, Gpio17, Gpio42, Gpio45, Input, Output, PinDriver,
+};
 use esp_idf_hal::i2c::{I2cDriver, config::Config as I2cConfig};
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_hal::spi::config::{Config as SpiConfig, MODE_0, MODE_3};
@@ -62,6 +64,13 @@ pub const DISPLAY_H: u32 = 240;
 pub struct TDeckBoard {
     display: TdeckDisplay,
     keyboard: TdeckKeyboardType,
+    // GPIO10 drives the peripheral power rail (LCD, LoRa, SD, keyboard) and
+    // must be held HIGH for the display to work. `PinDriver` resets the pin on
+    // drop, so keep it alive for the board's lifetime.
+    power_on: PinDriver<'static, Gpio10, Output>,
+    // Kept alive for the board's lifetime: `PinDriver` resets the pin on drop,
+    // so a local backlight pin would turn the LCD off at the end of `new()`.
+    backlight: PinDriver<'static, Gpio42, Output>,
     lora_hw: Option<LoraHw>,
     started: Instant,
 }
@@ -69,8 +78,16 @@ pub struct TDeckBoard {
 impl TDeckBoard {
     /// Initialise the board from the ESP-IDF peripherals.
     pub fn new(peripherals: Peripherals) -> Result<Self, EspError> {
+        // --- Peripheral power ---
+        // GPIO10 (BOARD_POWERON) powers the LCD, LoRa radio, SD card and
+        // keyboard; it must be HIGH for the display to work. The pin driver is
+        // kept alive for the board's lifetime (it resets the pin on drop).
+        let mut power_on = PinDriver::output(peripherals.pins.gpio10)?;
+        power_on.set_high()?;
+
         // --- LCD power ---
-        // GPIO42 is the backlight/TFT enable.
+        // GPIO42 is the backlight/TFT enable. The pin driver must be kept
+        // alive for the board's lifetime (it resets the pin on drop).
         let mut backlight = PinDriver::output(peripherals.pins.gpio42)?;
         backlight.set_high()?;
 
@@ -138,6 +155,8 @@ impl TDeckBoard {
         Ok(Self {
             display,
             keyboard,
+            power_on,
+            backlight,
             lora_hw: Some(provider),
             started: Instant::now(),
         })

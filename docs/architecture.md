@@ -225,6 +225,12 @@ Getting the SDK to run on-device took several ESP-IDF-specific fixes:
 * **Resetting to boot**: the T-Deck's auto-reset strap leaves the chip in
   download mode after a DTR/RTS reset, so `tools/build-esp32.sh` flashes with
   `--after watchdog-reset` (the app then boots normally).
+* **Peripheral power rail**: GPIO10 (`BOARD_POWERON`) powers the LCD, LoRa
+  radio, SD card and keyboard and must be driven HIGH — without it the display
+  stays black. `esp-idf-hal`'s `PinDriver` also resets a pin on drop
+  (`gpio_reset_without_pull`), so both GPIO10 and the backlight (GPIO42) are
+  stored in `TDeckBoard` and kept alive for the board's lifetime (a local pin
+  driver would turn them off at the end of `new()`).
 
 ## Roadmap notes
 
