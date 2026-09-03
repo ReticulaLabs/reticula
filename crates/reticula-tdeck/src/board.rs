@@ -27,7 +27,7 @@ use reticula_hal::Board;
 
 use crate::display::TdeckScreen;
 use crate::keyboard::TdeckKeyboard;
-use crate::pins;
+use crate::trackball::TdeckTrackball;
 
 /// LCD chip-select pin.
 pub type LcdCs = Gpio12;
@@ -64,12 +64,15 @@ pub const DISPLAY_H: u32 = 240;
 pub struct TDeckBoard {
     display: TdeckDisplay,
     keyboard: TdeckKeyboardType,
+    trackball: TdeckTrackball,
     // GPIO10 drives the peripheral power rail (LCD, LoRa, SD, keyboard) and
     // must be held HIGH for the display to work. `PinDriver` resets the pin on
     // drop, so keep it alive for the board's lifetime.
+    #[allow(dead_code)] // kept alive solely to hold the pin high
     power_on: PinDriver<'static, Gpio10, Output>,
     // Kept alive for the board's lifetime: `PinDriver` resets the pin on drop,
     // so a local backlight pin would turn the LCD off at the end of `new()`.
+    #[allow(dead_code)] // kept alive solely to hold the pin high
     backlight: PinDriver<'static, Gpio42, Output>,
     lora_hw: Option<LoraHw>,
     started: Instant,
@@ -132,6 +135,15 @@ impl TDeckBoard {
         )?;
         let keyboard = TdeckKeyboard::new(i2c);
 
+        // --- Trackball (4 direction inputs + click, active-low) ---
+        let trackball = TdeckTrackball::new(
+            peripherals.pins.gpio3,  // up
+            peripherals.pins.gpio15, // down
+            peripherals.pins.gpio1,  // left
+            peripherals.pins.gpio2,  // right
+            peripherals.pins.gpio0,  // click
+        )?;
+
         // --- SX1262 LoRa radio on the shared SPI2 bus ---
         let lora_device = SpiDeviceDriver::new(
             spi.clone(),
@@ -155,6 +167,7 @@ impl TDeckBoard {
         Ok(Self {
             display,
             keyboard,
+            trackball,
             power_on,
             backlight,
             lora_hw: Some(provider),
@@ -179,6 +192,10 @@ impl Board for TDeckBoard {
 
     fn keyboard(&mut self) -> &mut Self::Keyboard {
         &mut self.keyboard
+    }
+
+    fn trackball(&mut self) -> Option<&mut dyn reticula_hal::Keyboard> {
+        Some(&mut self.trackball)
     }
 
     fn delay_ms(&mut self, ms: u32) {

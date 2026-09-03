@@ -181,8 +181,11 @@ impl<B: Board> ReticulaApp<B> {
         let mut key_events = [KeyEvent::pressed(KeyCode::Unknown(0)); 16];
         let mut last_heartbeat = Instant::now();
         while !self.quit {
-            // Input.
-            let n = self.board.keyboard().read(&mut key_events);
+            // Input: keyboard plus any trackball/pointer device.
+            let mut n = self.board.keyboard().read(&mut key_events);
+            if let Some(trackball) = self.board.trackball() {
+                n += trackball.read(&mut key_events[n..]);
+            }
             for ev in key_events.iter().take(n) {
                 if ev.state == KeyState::Pressed {
                     let cmd = self.screen.handle_key(ev.code);

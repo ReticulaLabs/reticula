@@ -1,0 +1,6 @@
+[toolchain]
+# ESP32-S3 firmware builds use the Xtensa `esp` toolchain installed by
+# `espup install` (which also provides the `xtensa-esp32s3-espidf` target).
+# This shadows the workspace root's `stable` toolchain for host development.
+channel = "esp"
+profile = "minimal"

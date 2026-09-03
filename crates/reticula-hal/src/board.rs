@@ -18,6 +18,14 @@ pub trait Board {
     /// The keyboard / input device.
     fn keyboard(&mut self) -> &mut Self::Keyboard;
 
+    /// A secondary pointer/trackball input device, if the board has one.
+    ///
+    /// Reports the same logical key events as the keyboard (arrows, enter,
+    /// escape). Most boards do not have one and return `None`.
+    fn trackball(&mut self) -> Option<&mut dyn Keyboard> {
+        None
+    }
+
     /// Block for `ms` milliseconds.
     fn delay_ms(&mut self, ms: u32);
 

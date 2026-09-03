@@ -1,0 +1,18 @@
+# ESP-IDF firmware build configuration.
+#
+# The `xtensa-esp32s3-espidf` target's standard library is NOT prebuilt in the
+# `esp` toolchain (only the host std is). ESP-IDF (std) Rust builds compile the
+# std from the `rust-src` component at build time via `-Zbuild-std`.
+#
+# `IDF_PATH` must be exported in the environment first (`. $HOME/export-esp.sh`).
+[build]
+target = "xtensa-esp32s3-espidf"
+
+# esp-idf-sys 0.36 links through the `ldproxy` wrapper (installed with the
+# esp-rs toolchain) so the ESP-IDF C libraries get linked correctly.
+[target.'cfg(target_os = "espidf")']
+linker = "ldproxy"
+rustflags = ["--cfg", "espidf_time64"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
