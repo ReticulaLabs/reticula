@@ -231,6 +231,11 @@ Getting the SDK to run on-device took several ESP-IDF-specific fixes:
   (`gpio_reset_without_pull`), so both GPIO10 and the backlight (GPIO42) are
   stored in `TDeckBoard` and kept alive for the board's lifetime (a local pin
   driver would turn them off at the end of `new()`).
+* **No-flicker rendering**: `mipidsi` draws straight to the SPI bus, so
+  clearing + redrawing every frame visibly blinks the panel. `TdeckScreen`
+  renders into an offscreen RGB565 framebuffer (in PSRAM) and only pushes it
+  to the panel when the frame actually changed — a static screen is written
+  once and stays put.
 
 ## Roadmap notes
 
