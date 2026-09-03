@@ -59,6 +59,10 @@ lto = true
 codegen-units = 1
 panic = "abort"
 
-# The vendored fork of embuild (bindgen bump for clang >= 21) is used by the
-# whole workspace via the firmware's build. It is only wired in from
-# firmware/Cargo.toml; no workspace-wide patch is needed here.
+# Vendored forks wired in via `[patch.crates-io]`:
+#  - `reticulum-sdk`: embedded-friendly packet-cache retention (the upstream
+#    default of 180 s / 90 s cleanup grows without bound on a busy network and
+#    exhausts the device's internal RAM). See third_party/README.md.
+#  - `embuild`: bindgen bump for clang >= 21 (built only through the firmware).
+[patch.crates-io]
+reticulum-sdk = { path = "third_party/reticulum-sdk" }

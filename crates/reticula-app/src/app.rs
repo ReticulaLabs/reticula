@@ -14,6 +14,7 @@ use reticulum_sdk::hash::AddressHash;
 use reticulum_sdk::identity::PrivateIdentity;
 use reticulum_sdk::iface::tcp_client::TcpClient;
 use reticulum_sdk::iface::udp::UdpInterface;
+use reticulum_sdk::iface::InterfaceMode;
 use reticulum_sdk::transport::{Transport, TransportConfig};
 
 use reticula_hal::{Board, Display, Keyboard, KeyCode, KeyEvent, KeyState};
@@ -493,13 +494,17 @@ async fn build_transport(
             info!("reticulum: UDP interface bound to {bind}");
         }
         crate::TransportKind::TcpPeer { addr } => {
-            let iface = TcpClient::new(addr.to_string());
+            // Access-point mode: the device is a pure client, so it keeps no
+            // routing/path state for others, reducing memory use on the busy
+            // TCP network.
+            let iface = TcpClient::new(addr.to_string())
+                .with_interface_mode(InterfaceMode::AccessPoint);
             transport
                 .iface_manager()
                 .lock()
                 .await
                 .spawn(iface, TcpClient::spawn);
-            info!("reticulum: TCP client interface to {addr}");
+            info!("reticulum: TCP client interface to {addr} (access point mode)");
         }
         crate::TransportKind::None => {
             info!("reticulum: no network interface configured (offline)");

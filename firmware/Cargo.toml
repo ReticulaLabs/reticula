@@ -32,6 +32,10 @@ embedded-svc = "0.28"
 log = "0.4"
 
 [patch.crates-io]
+# Vendored fork: embedded-friendly packet-cache retention (see
+# third_party/README.md). The upstream 180 s retention grows without bound on
+# a busy network and exhausts internal RAM on the T-Deck.
+reticulum-sdk = { path = "../third_party/reticulum-sdk" }
 # embuild pins bindgen 0.71.1, which produces broken bindings with modern
 # clang (>= 21); the fork bumps it to 0.72.
 embuild = { path = "../third_party/embuild" }

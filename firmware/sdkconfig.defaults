@@ -17,6 +17,12 @@ CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_MALLOC=y
+# Route normal malloc (the Rust allocator / SDK state like the duplicate
+# packet cache and path tables) to PSRAM. Internal RAM is only ~350 KB and is
+# needed for the WiFi/lwIP stacks and FreeRTOS kernel objects (mutexes), which
+# cannot live in PSRAM. With the default 16 KB threshold, thousands of small
+# SDK allocations pile up in internal RAM and exhaust it on a busy network.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
 
 # 16 MB flash partition scheme.
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y

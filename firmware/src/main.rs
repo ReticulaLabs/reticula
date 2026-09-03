@@ -64,12 +64,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Route `log` output to the ESP-IDF console (UART0/USB-serial).
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    // The SDK is designed for a multi-thread runtime. Worker threads get a
-    // generous stack: the SDK's transport task does crypto and buffer work
-    // that overflows the ESP-IDF pthread default (8 KB).
+    // The SDK is designed for a multi-thread runtime. A single worker keeps
+    // internal RAM usage down (pthread stacks come from internal RAM only);
+    // the SDK's tasks are cooperative and share the one worker's stack.
+    // Worker threads get a generous stack: the SDK's transport task does
+    // crypto and buffer work that overflows the ESP-IDF pthread default (8 KB).
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_io()
         .enable_time()
+        .worker_threads(1)
         .thread_stack_size(65536)
         .build()
         .map_err(|e| format!("tokio runtime build: {e}"))?;
@@ -152,6 +155,30 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     log::info!("identity: {}", identity.to_hex_string());
+
+    // TEMP diagnostics: log internal-RAM pressure so we can see whether the
+    // reconnect loop exhausts the FreeRTOS kernel heap.
+    {
+        let net = net.clone();
+        let _ = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(3));
+            loop {
+                tick.tick().await;
+                unsafe {
+                    let internal_free = esp_idf_sys::heap_caps_get_free_size(esp_idf_sys::MALLOC_CAP_INTERNAL);
+                    let internal_total = esp_idf_sys::heap_caps_get_total_size(esp_idf_sys::MALLOC_CAP_INTERNAL);
+                    let all_free = esp_idf_sys::heap_caps_get_free_size(esp_idf_sys::MALLOC_CAP_8BIT);
+                    log::info!(
+                        "heap: internal {}/{}K free, total {:.0}K free (peer={})",
+                        internal_free / 1024,
+                        internal_total / 1024,
+                        all_free as f64 / 1024.0,
+                        matches!(net.transport, reticula_app::TransportKind::TcpPeer { .. }),
+                    );
+                }
+            }
+        });
+    }
 
     let mut app = ReticulaApp::new(board, identity, "Reticula".to_string(), net)
         .await
