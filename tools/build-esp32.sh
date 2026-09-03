@@ -97,10 +97,11 @@ build() {
 }
 
 flash() {
+  # Always rebuild first so build-time env vars (WIFI_SSID, WIFI_PASS,
+  # RNS_PEER, LORA_FREQ, ...) are picked up rather than flashing a stale
+  # binary.
+  build
   local bin="target/xtensa-esp32s3-espidf/release/reticula-firmware"
-  if [[ ! -f "$bin" ]]; then
-    build
-  fi
   # The T-Deck's auto-reset strap leaves the chip in download mode after a
   # DTR/RTS hard reset, so use a watchdog reset instead (boots the app). The
   # monitor connection drops after the reset; use `espflash monitor` after.

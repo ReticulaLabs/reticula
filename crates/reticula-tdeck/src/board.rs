@@ -5,12 +5,11 @@ use std::time::Instant;
 
 use esp_idf_hal::delay::Ets;
 use esp_idf_hal::gpio::{
-    Gpio10, Gpio11, Gpio12, Gpio13, Gpio17, Gpio42, Gpio45, Input, Output, PinDriver,
+    Gpio10, Gpio11, Gpio12, Gpio13, Gpio17, Gpio42, Gpio45, Input, Output, PinDriver, Pins,
 };
-use esp_idf_hal::i2c::{I2cDriver, config::Config as I2cConfig};
-use esp_idf_hal::peripherals::Peripherals;
+use esp_idf_hal::i2c::{I2cDriver, I2C0, config::Config as I2cConfig};
 use esp_idf_hal::spi::config::{Config as SpiConfig, MODE_0, MODE_3};
-use esp_idf_hal::spi::{SpiDeviceDriver, SpiDriver, SpiDriverConfig};
+use esp_idf_hal::spi::{SpiDeviceDriver, SpiDriver, SpiDriverConfig, SPI2};
 use esp_idf_hal::units::*;
 
 use embedded_graphics::geometry::Size;
@@ -79,34 +78,35 @@ pub struct TDeckBoard {
 }
 
 impl TDeckBoard {
-    /// Initialise the board from the ESP-IDF peripherals.
-    pub fn new(peripherals: Peripherals) -> Result<Self, EspError> {
+    /// Initialise the board from the peripherals it needs. The radio modem is
+    /// intentionally not taken here so the caller can hand it to WiFi.
+    pub fn new(spi2: SPI2, i2c0: I2C0, pins: Pins) -> Result<Self, EspError> {
         // --- Peripheral power ---
         // GPIO10 (BOARD_POWERON) powers the LCD, LoRa radio, SD card and
         // keyboard; it must be HIGH for the display to work. The pin driver is
         // kept alive for the board's lifetime (it resets the pin on drop).
-        let mut power_on = PinDriver::output(peripherals.pins.gpio10)?;
+        let mut power_on = PinDriver::output(pins.gpio10)?;
         power_on.set_high()?;
 
         // --- LCD power ---
         // GPIO42 is the backlight/TFT enable. The pin driver must be kept
         // alive for the board's lifetime (it resets the pin on drop).
-        let mut backlight = PinDriver::output(peripherals.pins.gpio42)?;
+        let mut backlight = PinDriver::output(pins.gpio42)?;
         backlight.set_high()?;
 
         // --- Shared SPI2 bus (LCD + LoRa) ---
         let spi = Arc::new(SpiDriver::new(
-            peripherals.spi2,
-            peripherals.pins.gpio40,            // SCLK
-            peripherals.pins.gpio41,            // MOSI
-            Some(peripherals.pins.gpio38),      // MISO
+            spi2,
+            pins.gpio40,            // SCLK
+            pins.gpio41,            // MOSI
+            Some(pins.gpio38),      // MISO
             &SpiDriverConfig::new(),
         )?);
 
-        let dc = PinDriver::output(peripherals.pins.gpio11)?;
+        let dc = PinDriver::output(pins.gpio11)?;
         let lcd_device = SpiDeviceDriver::new(
             spi.clone(),
-            Some(peripherals.pins.gpio12),      // LCD CS
+            Some(pins.gpio12),      // LCD CS
             &SpiConfig::new()
                 .baudrate(40.MHz().into())
                 .data_mode(MODE_3),
@@ -128,33 +128,33 @@ impl TDeckBoard {
 
         // --- Keyboard over I²C ---
         let i2c = I2cDriver::new(
-            peripherals.i2c0,
-            peripherals.pins.gpio18,          // SDA
-            peripherals.pins.gpio8,           // SCL
+            i2c0,
+            pins.gpio18,          // SDA
+            pins.gpio8,           // SCL
             &I2cConfig::new().baudrate(100.kHz().into()),
         )?;
         let keyboard = TdeckKeyboard::new(i2c);
 
         // --- Trackball (4 direction inputs + click, active-low) ---
         let trackball = TdeckTrackball::new(
-            peripherals.pins.gpio3,  // up
-            peripherals.pins.gpio15, // down
-            peripherals.pins.gpio1,  // left
-            peripherals.pins.gpio2,  // right
-            peripherals.pins.gpio0,  // click
+            pins.gpio3,  // up
+            pins.gpio15, // down
+            pins.gpio1,  // left
+            pins.gpio2,  // right
+            pins.gpio0,  // click
         )?;
 
         // --- SX1262 LoRa radio on the shared SPI2 bus ---
         let lora_device = SpiDeviceDriver::new(
             spi.clone(),
-            Some(peripherals.pins.gpio9),       // LoRa CS
+            Some(pins.gpio9),       // LoRa CS
             &SpiConfig::new()
                 .baudrate(1.MHz().into())
                 .data_mode(MODE_0),
         )?;
-        let lora_busy = PinDriver::input(peripherals.pins.gpio13)?;   // input
-        let lora_reset = PinDriver::output(peripherals.pins.gpio17)?; // output
-        let lora_dio1 = PinDriver::input(peripherals.pins.gpio45)?;   // input
+        let lora_busy = PinDriver::input(pins.gpio13)?;   // input
+        let lora_reset = PinDriver::output(pins.gpio17)?; // output
+        let lora_dio1 = PinDriver::input(pins.gpio45)?;   // input
 
         let provider = Arc::new(EmbeddedLoRaHw::new(
             Arc::new(Mutex::new(lora_device)),

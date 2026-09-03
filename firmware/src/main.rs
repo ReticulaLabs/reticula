@@ -7,8 +7,8 @@
 //!
 //! * `WIFI_SSID` / `WIFI_PASS` — WiFi credentials (optional; the device runs
 //!   offline otherwise).
-//! * `RNS_PEER` — `host:port` of a reachable Reticulum node to peer with
-//!   (optional).
+//! * `RNS_PEER` — `host:port` of a reachable Reticulum node to connect to
+//!   over TCP (optional). Without it the device listens on UDP.
 
 #![allow(clippy::missing_safety_doc)]
 
@@ -80,8 +80,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("reticula-firmware starting");
 
+    // Take the peripherals once; WiFi needs the modem, the board needs the
+    // rest. (A second `Peripherals::take()` would fail with
+    // ESP_ERR_INVALID_STATE once the modem is taken.)
+    let Peripherals {
+        spi2,
+        i2c0,
+        modem,
+        pins,
+        ..
+    } = Peripherals::take().map_err(|e| format!("Peripherals::take: {e}"))?;
+
     // WiFi (best-effort; the device still runs offline).
-    let _wifi = match connect_wifi() {
+    let _wifi = match connect_wifi(modem) {
         Ok(wifi) => {
             log::info!("WiFi connected");
             Some(wifi)
@@ -92,8 +103,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let peripherals = Peripherals::take().unwrap();
-    let board = TDeckBoard::new(peripherals)
+    let board = TDeckBoard::new(spi2, i2c0, pins)
         .map_err(|e| format!("TDeckBoard::new: {e}"))?;
 
     // TODO: persist the identity (NVS / SPIFFS). A fresh identity is
@@ -123,9 +133,18 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let net = NetConfig {
-        transport: TransportKind::Udp {
-            bind: "0.0.0.0:5238".to_string(),
-            forward: RNS_PEER.map(str::to_string),
+        transport: match RNS_PEER {
+            // Default to an outbound TCP connection to a reachable Reticulum
+            // node (`host:port`).
+            Some(peer) => TransportKind::TcpPeer {
+                addr: peer.to_string(),
+            },
+            // No peer configured: listen on UDP so the device can still be
+            // reached on the local network.
+            None => TransportKind::Udp {
+                bind: "0.0.0.0:5238".to_string(),
+                forward: None,
+            },
         },
         quit_on_root_back: false,
         announce_interval: Duration::from_secs(300),
@@ -145,7 +164,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 /// Connect to WiFi as a station, if credentials are configured.
 ///
 /// Returns the blocking WiFi handle so it stays alive for the app's lifetime.
-fn connect_wifi() -> Result<BlockingWifi<EspWifi<'static>>, Box<dyn std::error::Error>> {
+fn connect_wifi(
+    modem: esp_idf_hal::modem::Modem,
+) -> Result<BlockingWifi<EspWifi<'static>>, Box<dyn std::error::Error>> {
     let Some(ssid) = WIFI_SSID else {
         return Err("WIFI_SSID not configured".into());
     };
@@ -153,9 +174,8 @@ fn connect_wifi() -> Result<BlockingWifi<EspWifi<'static>>, Box<dyn std::error::
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
 
-    let peripherals = esp_idf_svc::hal::peripherals::Peripherals::take().unwrap();
     let mut wifi = BlockingWifi::wrap(
-        EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs))?,
+        EspWifi::new(modem, sys_loop.clone(), Some(nvs))?,
         sys_loop,
     )?;
 
