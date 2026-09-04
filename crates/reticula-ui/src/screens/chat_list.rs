@@ -77,12 +77,10 @@ impl ChatListScreen {
         let width = size.width as i32;
         let height = size.height as i32;
 
-        let header = Rectangle::new(Point::new(0, 0), px(width, theme.line_h));
         let count = format!("{} conv", ctx.conversations.len());
-        widgets::draw_bar(target, header, "Chat", &count, theme.header, theme.header_text, theme)
-            .ok();
+        widgets::draw_header(target, width, "Chat", &count, &ctx.network, theme).ok();
 
-        let body_top = header.size.height as i32;
+        let body_top = theme.line_h;
         let visible = theme.lines_fit(height - body_top - theme.line_h);
         self.state.keep_visible(visible);
 

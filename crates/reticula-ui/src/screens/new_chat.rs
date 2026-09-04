@@ -57,11 +57,9 @@ impl NewChatScreen {
         let size = target.bounding_box().size;
         let width = size.width as i32;
 
-        let header = Rectangle::new(Point::new(0, 0), px(width, theme.line_h));
-        widgets::draw_bar(target, header, "New message", "", theme.header, theme.header_text, theme)
-            .ok();
+        widgets::draw_header(target, width, "New message", "", &ctx.network, theme).ok();
 
-        let mut y = header.size.height as i32;
+        let mut y = theme.line_h;
 
         widgets::draw_text(
             target,

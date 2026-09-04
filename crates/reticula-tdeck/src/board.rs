@@ -11,6 +11,7 @@ use esp_idf_hal::i2c::{I2cDriver, I2C0, config::Config as I2cConfig};
 use esp_idf_hal::spi::config::{Config as SpiConfig, MODE_0, MODE_3};
 use esp_idf_hal::spi::{SpiDeviceDriver, SpiDriver, SpiDriverConfig, SPI2};
 use esp_idf_hal::units::*;
+use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 
 use embedded_graphics::geometry::Size;
 use mipidsi::interface::SpiInterface;
@@ -64,6 +65,9 @@ pub struct TDeckBoard {
     display: TdeckDisplay,
     keyboard: TdeckKeyboardType,
     trackball: TdeckTrackball,
+    // WiFi handle, attached by the firmware after `new`; kept alive here and
+    // used to report link status/RSSI to the UI.
+    wifi: Option<BlockingWifi<EspWifi<'static>>>,
     // GPIO10 drives the peripheral power rail (LCD, LoRa, SD, keyboard) and
     // must be held HIGH for the display to work. `PinDriver` resets the pin on
     // drop, so keep it alive for the board's lifetime.
@@ -173,11 +177,18 @@ impl TDeckBoard {
             display,
             keyboard,
             trackball,
+            wifi: None,
             power_on,
             backlight,
             lora_hw: Some(provider),
             started: Instant::now(),
         })
+    }
+
+    /// Attach the WiFi handle so the board can report link status and RSSI to
+    /// the UI (and keep the connection alive for the board's lifetime).
+    pub fn attach_wifi(&mut self, wifi: BlockingWifi<EspWifi<'static>>) {
+        self.wifi = Some(wifi);
     }
 
     /// The LoRa radio hardware provider, for wiring an SX1262 interface into
@@ -201,6 +212,13 @@ impl Board for TDeckBoard {
 
     fn trackball(&mut self) -> Option<&mut dyn reticula_hal::Keyboard> {
         Some(&mut self.trackball)
+    }
+
+    fn wifi_status(&self) -> Option<(bool, i8)> {
+        let wifi = self.wifi.as_ref()?;
+        let connected = wifi.is_connected().unwrap_or(false);
+        let rssi = wifi.wifi().get_rssi().map(|r| r as i8).unwrap_or(-100);
+        Some((connected, rssi))
     }
 
     fn delay_ms(&mut self, ms: u32) {

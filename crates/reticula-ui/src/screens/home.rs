@@ -53,16 +53,9 @@ impl HomeScreen {
         let width = size.width as i32;
         let height = size.height as i32;
 
-        let header = Rectangle::new(Point::new(0, 0), px(width, theme.line_h));
-        let status = if ctx.network.connected {
-            "connected"
-        } else {
-            "connecting..."
-        };
-        widgets::draw_bar(target, header, "RETICULA", status, theme.header, theme.header_text, theme)
-            .ok();
+        widgets::draw_header(target, width, "RETICULA", "", &ctx.network, theme).ok();
 
-        let body_top = header.size.height as i32;
+        let body_top = theme.line_h;
         let mut y = body_top;
 
         // Device/identity status line.

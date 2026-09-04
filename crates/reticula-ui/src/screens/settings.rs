@@ -87,11 +87,9 @@ impl SettingsScreen {
         let size = target.bounding_box().size;
         let width = size.width as i32;
 
-        let header = Rectangle::new(Point::new(0, 0), px(width, theme.line_h));
-        widgets::draw_bar(target, header, "Settings", "", theme.header, theme.header_text, theme)
-            .ok();
+        widgets::draw_header(target, width, "Settings", "", &ctx.network, theme).ok();
 
-        let mut y = header.size.height as i32;
+        let mut y = theme.line_h;
 
         // Row 0: display name.
         if self.editing {

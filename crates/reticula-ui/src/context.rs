@@ -51,6 +51,12 @@ pub struct NetworkState {
     pub uptime_ms: u64,
     /// Number of currently open peer links.
     pub peer_links: u32,
+    /// Whether the WiFi link is up.
+    pub wifi_connected: bool,
+    /// WiFi RSSI in dBm, when the board has WiFi.
+    pub wifi_rssi: Option<i8>,
+    /// Whether the LoRa radio interface is online. `None` when not configured.
+    pub lora_online: Option<bool>,
 }
 
 /// Immutable snapshot of application state for one rendered frame.

@@ -106,7 +106,6 @@ impl ChatScreen {
         let width = size.width as i32;
         let height = size.height as i32;
 
-        let header = Rectangle::new(Point::new(0, 0), px(width, theme.line_h));
         // Show the peer's display name when known, else the address prefix.
         let fallback = hex_prefix(&self.peer);
         let peer_name = ctx
@@ -122,9 +121,9 @@ impl ChatScreen {
             })
             .unwrap_or(&fallback);
         let title = format!("{peer_name}");
-        widgets::draw_bar(target, header, &title, "", theme.header, theme.header_text, theme).ok();
+        widgets::draw_header(target, width, &title, "", &ctx.network, theme).ok();
 
-        let body_top = header.size.height as i32;
+        let body_top = theme.line_h;
         let composer_y = height - theme.line_h;
         let status_y = composer_y - theme.line_h;
         let body = Rectangle::new(Point::new(0, body_top), px(width, status_y - body_top));

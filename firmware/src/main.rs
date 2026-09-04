@@ -94,8 +94,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         ..
     } = Peripherals::take().map_err(|e| format!("Peripherals::take: {e}"))?;
 
-    // WiFi (best-effort; the device still runs offline).
-    let _wifi = match connect_wifi(modem) {
+    // WiFi (best-effort; the device still runs offline). The handle is attached
+    // to the board so the UI can report link status and RSSI.
+    let wifi = match connect_wifi(modem) {
         Ok(wifi) => {
             log::info!("WiFi connected");
             Some(wifi)
@@ -106,8 +107,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let board = TDeckBoard::new(spi2, i2c0, pins)
+    let mut board = TDeckBoard::new(spi2, i2c0, pins)
         .map_err(|e| format!("TDeckBoard::new: {e}"))?;
+    if let Some(wifi) = wifi {
+        board.attach_wifi(wifi);
+    }
 
     // TODO: persist the identity (NVS / SPIFFS). A fresh identity is
     // generated on every boot until storage is wired up.

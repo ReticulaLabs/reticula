@@ -23,6 +23,7 @@ mipidsi = "0.10"
 embedded-hal = "1.0"
 
 esp-idf-hal = "0.45"
+esp-idf-svc = "0.51"
 esp-idf-sys = { version = "0.36", features = ["binstart"] }
 
 log = "0.4"

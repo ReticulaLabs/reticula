@@ -26,6 +26,13 @@ pub trait Board {
         None
     }
 
+    /// WiFi link status: `(connected, rssi_dbm)`.
+    ///
+    /// Returns `None` when the board has no WiFi (e.g. the desktop simulator).
+    fn wifi_status(&self) -> Option<(bool, i8)> {
+        None
+    }
+
     /// Block for `ms` milliseconds.
     fn delay_ms(&mut self, ms: u32);
 

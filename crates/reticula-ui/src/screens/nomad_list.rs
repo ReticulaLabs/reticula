@@ -58,20 +58,10 @@ impl NomadListScreen {
         let width = size.width as i32;
         let height = size.height as i32;
 
-        let header = Rectangle::new(Point::new(0, 0), px(width, theme.line_h));
         let count_label = format!("{} nodes", self.count);
-        widgets::draw_bar(
-            target,
-            header,
-            "NomadNet",
-            &count_label,
-            theme.header,
-            theme.header_text,
-            theme,
-        )
-        .ok();
+        widgets::draw_header(target, width, "NomadNet", &count_label, &ctx.network, theme).ok();
 
-        let body_top = header.size.height as i32;
+        let body_top = theme.line_h;
         let visible = theme.lines_fit(height - body_top - theme.line_h);
         self.state.keep_visible(visible);
 

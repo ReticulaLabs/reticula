@@ -98,6 +98,8 @@ pub struct ReticulaApp<B: Board> {
     back_stack: Vec<Screen>,
     quit_on_root_back: bool,
     quit: bool,
+    /// Whether a LoRa radio interface is active (`None` = not configured).
+    lora_online: Option<bool>,
 }
 
 impl<B: Board> ReticulaApp<B> {
@@ -138,6 +140,16 @@ impl<B: Board> ReticulaApp<B> {
             back_stack: Vec::new(),
             quit_on_root_back: net.quit_on_root_back,
             quit: false,
+            lora_online: {
+                #[cfg(feature = "lora")]
+                {
+                    net.lora.as_ref().map(|_| true)
+                }
+                #[cfg(not(feature = "lora"))]
+                {
+                    None
+                }
+            },
         })
     }
 
@@ -513,6 +525,9 @@ LxmfEvent::ContactDiscovered { address, name } => {
                 connected: shared.connected.load(Ordering::Relaxed),
                 uptime_ms: board.uptime_ms(),
                 peer_links: shared.peer_links.load(Ordering::Relaxed),
+                wifi_connected: board.wifi_status().map(|w| w.0).unwrap_or(false),
+                wifi_rssi: board.wifi_status().map(|w| w.1),
+                lora_online: self.lora_online,
             },
         };
 
