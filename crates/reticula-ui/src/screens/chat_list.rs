@@ -8,7 +8,7 @@ use embedded_graphics::primitives::Rectangle;
 use reticula_hal::KeyCode;
 
 use crate::command::{Command, ScreenId};
-use crate::context::ViewContext;
+use crate::context::{Conversation, ViewContext};
 use crate::screens::ListState;
 use crate::theme::Theme;
 use crate::widgets::{self, px};
@@ -19,6 +19,9 @@ pub struct ChatListScreen {
     selected_peer: Option<[u8; 16]>,
     /// Total rows known at render time ("New message" + conversations).
     item_count: usize,
+    /// Live search filter: matches the peer's name or address. Empty = no
+    /// filtering. Typing on this screen edits it.
+    filter: String,
 }
 
 impl Default for ChatListScreen {
@@ -27,6 +30,7 @@ impl Default for ChatListScreen {
             state: ListState::default(),
             selected_peer: None,
             item_count: 1,
+            filter: String::new(),
         }
     }
 }
@@ -39,6 +43,29 @@ impl ChatListScreen {
     }
 
     pub fn handle_key(&mut self, key: KeyCode) -> Command {
+        // Typing edits the live filter.
+        match key {
+            KeyCode::Char(c) if c.is_ascii_graphic() => {
+                self.filter.push(c);
+                self.state.selected = 0;
+                self.state.scroll = 0;
+                return Command::None;
+            }
+            KeyCode::Space => {
+                self.filter.push(' ');
+                self.state.selected = 0;
+                self.state.scroll = 0;
+                return Command::None;
+            }
+            KeyCode::Backspace => {
+                self.filter.pop();
+                self.state.selected = 0;
+                self.state.scroll = 0;
+                return Command::None;
+            }
+            _ => {}
+        }
+
         match key {
             KeyCode::Up => {
                 self.state.move_up();
@@ -49,6 +76,13 @@ impl ChatListScreen {
                 Command::None
             }
             KeyCode::Enter => {
+                if !self.filter.is_empty() {
+                    // Searching: ENTER opens the selected match.
+                    return match self.selected_peer {
+                        Some(peer) => Command::StartChat(peer),
+                        None => Command::None,
+                    };
+                }
                 if self.state.selected == 0 {
                     Command::ShowScreen(ScreenId::NewChat)
                 } else {
@@ -67,48 +101,81 @@ impl ChatListScreen {
     where
         D: DrawTarget<Color = Rgb565>,
     {
-        self.item_count = ctx.conversations.len() + 1;
-        self.selected_peer = ctx
+        let filtered: Vec<&Conversation> = ctx
             .conversations
-            .get(self.state.selected.saturating_sub(1))
-            .map(|c| c.peer);
+            .iter()
+            .filter(|c| filter_matches(c, &self.filter))
+            .collect();
+
+        // The "+ New message" row is hidden while searching.
+        let has_new_row = self.filter.is_empty();
+        self.item_count = filtered.len() + has_new_row as usize;
+        let selected_idx = if has_new_row {
+            self.state.selected.saturating_sub(1)
+        } else {
+            self.state.selected
+        };
+        self.selected_peer = filtered.get(selected_idx).map(|c| c.peer);
+        self.state.clamp(self.item_count);
 
         let size = target.bounding_box().size;
         let width = size.width as i32;
         let height = size.height as i32;
 
-        let count = format!("{} conv", ctx.conversations.len());
+        let count = format!("{} conv", filtered.len());
         widgets::draw_header(target, width, "Chat", &count, &ctx.network, theme).ok();
 
-        let body_top = theme.line_h;
+        let header_h = theme.line_h;
+        let search_h = if self.filter.is_empty() { 0 } else { theme.line_h };
+        let body_top = header_h + search_h;
         let visible = theme.lines_fit(height - body_top - theme.line_h);
         self.state.keep_visible(visible);
 
-        let mut row_y = body_top;
+        // Live search line.
+        let mut row_y = header_h;
+        if !self.filter.is_empty() {
+            let label = format!("> {}", self.filter);
+            widgets::draw_text(target, Point::new(0, header_h), &label, theme.accent, theme).ok();
+            row_y = body_top;
+        }
 
-        // "New message" row.
-        if self.state.scroll == 0 {
-            let at = Point::new(0, row_y);
-            if self.state.selected == 0 {
-                widgets::draw_highlight(
-                    target,
-                    at,
-                    Self::NEW_LABEL,
-                    width,
-                    theme.selection,
-                    theme.selection_text,
-                    theme,
-                )
-                .ok();
-            } else {
-                widgets::draw_text(target, at, Self::NEW_LABEL, theme.ok, theme).ok();
+        if self.filter.is_empty() {
+            // "New message" row.
+            if self.state.scroll == 0 {
+                let at = Point::new(0, row_y);
+                if self.state.selected == 0 {
+                    widgets::draw_highlight(
+                        target,
+                        at,
+                        Self::NEW_LABEL,
+                        width,
+                        theme.selection,
+                        theme.selection_text,
+                        theme,
+                    )
+                    .ok();
+                } else {
+                    widgets::draw_text(target, at, Self::NEW_LABEL, theme.ok, theme).ok();
+                }
+                row_y += theme.line_h;
             }
-            row_y += theme.line_h;
+        }
+
+        if filtered.is_empty() && !self.filter.is_empty() {
+            widgets::draw_text(
+                target,
+                Point::new(0, row_y),
+                "No matches.",
+                theme.text_dim,
+                theme,
+            )
+            .ok();
         }
 
         let preview_chars = theme.chars_per_line(width - 30);
-        for (i, conv) in ctx.conversations.iter().enumerate().skip(self.state.scroll) {
-            let row_in_view = i + 1 - self.state.scroll;
+        for (i, conv) in filtered.iter().enumerate().skip(self.state.scroll) {
+            let row_index = i + has_new_row as usize;
+            let row_in_view = row_index - self.state.scroll;
             if row_in_view >= visible {
                 break;
             }
@@ -130,7 +197,7 @@ impl ChatListScreen {
             let line = format!("{}{} {}", who, marker, preview);
 
             let at = Point::new(0, row_y);
-            if self.state.selected == i + 1 {
+            if row_index == self.state.selected {
                 widgets::draw_highlight(
                     target,
                     at,
@@ -151,10 +218,15 @@ impl ChatListScreen {
             Point::new(0, height - theme.line_h),
             px(width, theme.line_h),
         );
+        let hint = if self.filter.is_empty() {
+            "TYPE to search | ENTER open | ESC back"
+        } else {
+            "filtering | ENTER open | ESC back"
+        };
         widgets::draw_bar(
             target,
             footer,
-            "ENTER open / ESC back",
+            hint,
             "",
             theme.surface,
             theme.text_dim,
@@ -173,5 +245,45 @@ impl ChatListScreen {
             theme,
         )
         .ok();
+    }
+}
+
+/// Whether a conversation matches the search filter (by display name or
+/// address, case-insensitively).
+fn filter_matches(conv: &Conversation, filter: &str) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let q = filter.to_lowercase();
+    conv.peer_name.to_lowercase().contains(&q) || conv.peer_hex.contains(&q)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conv(name: &str, hex: &str) -> Conversation {
+        Conversation {
+            peer: [0u8; 16],
+            peer_hex: hex.to_string(),
+            peer_name: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn empty_filter_matches_everything() {
+        assert!(filter_matches(&conv("", "aabbccdd"), ""));
+    }
+
+    #[test]
+    fn matches_name_case_insensitively() {
+        assert!(filter_matches(&conv("Pepper", "aabbccdd"), "pep"));
+        assert!(filter_matches(&conv("Pepper", "aabbccdd"), "PEPPER"));
+        assert!(!filter_matches(&conv("Pepper", "aabbccdd"), "zeno"));
+    }
+
+    #[test]
+    fn matches_address_prefix() {
+        assert!(filter_matches(&conv("", "aabbccddeeff00112233445566778899"), "aabb"));
     }
 }
