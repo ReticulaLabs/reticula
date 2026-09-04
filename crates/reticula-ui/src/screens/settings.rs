@@ -114,7 +114,16 @@ impl SettingsScreen {
             Point::new(0, height - theme.line_h),
             px(width, theme.line_h),
         );
-        widgets::draw_bar(target, footer, "ALT+Backspace back", "", theme.surface, theme.text_dim, theme)
-            .ok();
+        let short = widgets::truncate(ctx.identity_hex, 12);
+        widgets::draw_bar(
+            target,
+            footer,
+            "ALT+Backspace back",
+            &short,
+            theme.surface,
+            theme.text_dim,
+            theme,
+        )
+        .ok();
     }
 }
