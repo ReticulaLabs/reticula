@@ -165,6 +165,12 @@ Firmware configuration is supplied at build time:
 | `WIFI_PASS` | Station password.                                |
 | `RNS_PEER`  | `host:port` Reticulum node to peer with (optional). |
 
+WiFi credentials and the Reticulum identity can also be changed at runtime from
+the Settings menu (Identity / WiFi sub-menus). Changes are persisted to NVS
+(namespace `reticula`, keys `identity`, `wifi_ssid`, `wifi_pass`) and applied on
+the next boot: the device restarts, then reads NVS credentials first (falling
+back to the build-time `WIFI_SSID`/`WIFI_PASS`).
+
 ### Embedded support
 
 `reticulum-sdk` v2.3 gained the embedded/ESP32 support upstream: the

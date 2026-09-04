@@ -7,6 +7,9 @@ use std::time::{Duration, Instant};
 
 use log::{info, warn};
 
+use getrandom::SysRng;
+use rand_core::UnwrapErr;
+
 use tokio::sync::Mutex as AsyncMutex;
 
 use reticulum_sdk::destination::{DestinationName, SingleInputDestination};
@@ -18,7 +21,7 @@ use reticulum_sdk::iface::InterfaceMode;
 use reticulum_sdk::transport::{Transport, TransportConfig};
 
 use reticula_hal::{Board, Display, Keyboard, KeyCode, KeyEvent, KeyState};
-use reticula_lxmf::client::{APP_NAME, DELIVERY_ASPECT};
+use reticula_lxmf::client::{delivery_address_for, APP_NAME, DELIVERY_ASPECT};
 use reticula_lxmf::{LxmfClient, LxmfEvent, MessageStore};
 use reticula_nomad::client::DEFAULT_PAGE_PATH;
 use reticula_nomad::{NomadClient, NomadEvent, Page};
@@ -32,6 +35,8 @@ use reticula_ui::screens::new_chat::NewChatScreen;
 use reticula_ui::screens::nomad_list::NomadListScreen;
 use reticula_ui::screens::nomad_view::NomadViewScreen;
 use reticula_ui::screens::settings::SettingsScreen;
+use reticula_ui::screens::settings_identity::SettingsIdentityScreen;
+use reticula_ui::screens::settings_wifi::SettingsWifiScreen;
 use reticula_ui::{Command, Screen, ScreenId, Theme};
 
 use crate::config::NetConfig;
@@ -43,6 +48,12 @@ use crate::config::NetConfig;
 pub const FRAME_MS: u64 = 25;
 /// Maximum number of messages kept in memory.
 pub const MAX_MESSAGES: usize = 512;
+
+/// Persists a freshly generated identity (NVS on device, file on the sim).
+/// Called before the app requests a restart so the new identity survives it.
+pub type PersistIdentity = Box<dyn Fn(&PrivateIdentity) + Send + 'static>;
+/// Persists new WiFi credentials (NVS on device). No-op on the simulator.
+pub type PersistWifi = Box<dyn Fn(&str, &str) + Send + 'static>;
 
 /// Errors produced by the application.
 #[derive(Debug)]
@@ -101,6 +112,16 @@ pub struct ReticulaApp<B: Board> {
     back_stack: Vec<Screen>,
     quit_on_root_back: bool,
     quit: bool,
+    /// Persist a regenerated identity before restarting.
+    persist_identity: Option<PersistIdentity>,
+    /// Persist new WiFi credentials before restarting.
+    persist_wifi: Option<PersistWifi>,
+    /// The currently configured WiFi SSID (for display in the WiFi sub-menu).
+    wifi_ssid: String,
+    /// Transient notice shown on the settings screens (e.g. "restarting…").
+    notice: String,
+    /// Set when the app must restart (identity regenerated / WiFi changed).
+    restart_requested: bool,
     /// Whether a LoRa radio interface is active (`None` = not configured).
     lora_online: Option<bool>,
 }
@@ -108,11 +129,18 @@ pub struct ReticulaApp<B: Board> {
 impl<B: Board> ReticulaApp<B> {
     /// Create the application, bring up the Reticulum transport and register
     /// the LXMF delivery identity.
+    ///
+    /// `persist_identity` is called with a freshly generated identity before a
+    /// restart (so regeneration survives the reboot); `persist_wifi` is called
+    /// with new SSID/password. Either may be `None` (e.g. the simulator has no
+    /// WiFi persistence).
     pub async fn new(
         board: B,
         identity: PrivateIdentity,
         display_name: String,
         net: NetConfig,
+        persist_identity: Option<PersistIdentity>,
+        persist_wifi: Option<PersistWifi>,
     ) -> Result<Self, AppError> {
         let (transport, delivery) = build_transport(&identity, &net).await?;
 
@@ -129,6 +157,7 @@ impl<B: Board> ReticulaApp<B> {
         // Show the LXMF delivery address (what peers use to message us), not
         // the raw identity key hex.
         let identity_hex = lxmf.delivery_address().to_hex_string();
+        let wifi_ssid = board.wifi_ssid().unwrap_or_default();
 
         Ok(Self {
             board,
@@ -145,6 +174,11 @@ impl<B: Board> ReticulaApp<B> {
             back_stack: Vec::new(),
             quit_on_root_back: net.quit_on_root_back,
             quit: false,
+            persist_identity,
+            persist_wifi,
+            wifi_ssid,
+            notice: String::new(),
+            restart_requested: false,
             lora_online: {
                 #[cfg(feature = "lora")]
                 {
@@ -161,6 +195,12 @@ impl<B: Board> ReticulaApp<B> {
     /// Our LXMF identity.
     pub fn identity(&self) -> &PrivateIdentity {
         &self.identity
+    }
+
+    /// Whether the app asked to restart (identity regenerated / WiFi changed).
+    /// The platform should reboot/reload so the change takes effect.
+    pub fn restart_requested(&self) -> bool {
+        self.restart_requested
     }
 
     /// The main application loop.
@@ -261,6 +301,13 @@ impl<B: Board> ReticulaApp<B> {
             // Render.
             self.render();
 
+            // A settings change requested a restart: show the notice briefly,
+            // then return so the platform can reboot/reload.
+            if self.restart_requested {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                return Ok(());
+            }
+
             // Periodic heartbeat so a connected serial monitor shows the app
             // is alive and healthy.
             if last_heartbeat.elapsed() >= Duration::from_secs(10) {
@@ -335,9 +382,32 @@ impl<B: Board> ReticulaApp<B> {
                 tokio::spawn(async move { lxmf.announce().await });
             }
             Command::SetDisplayName(name) => {
-                self.display_name = name;
+                self.display_name = name.clone();
                 let lxmf = self.lxmf.clone();
-                tokio::spawn(async move { lxmf.announce().await });
+                tokio::spawn(async move {
+                    lxmf.set_display_name(name);
+                    lxmf.announce().await;
+                });
+            }
+            Command::RegenerateIdentity => {
+                let identity = PrivateIdentity::new_from_rand(&mut UnwrapErr(SysRng));
+                if let Some(persist) = &self.persist_identity {
+                    persist(&identity);
+                }
+                // Refresh the displayed address for the brief moment before
+                // the restart; the transport still uses the old identity.
+                self.identity = identity;
+                self.identity_hex = delivery_address_for(&self.identity).to_hex_string();
+                self.notice = "New identity saved. Restarting…".to_string();
+                self.restart_requested = true;
+            }
+            Command::SaveWifi { ssid, password } => {
+                if let Some(persist) = &self.persist_wifi {
+                    persist(&ssid, &password);
+                }
+                self.wifi_ssid = ssid;
+                self.notice = "WiFi saved. Restarting…".to_string();
+                self.restart_requested = true;
             }
         }
     }
@@ -353,6 +423,8 @@ impl<B: Board> ReticulaApp<B> {
             ScreenId::NewChat => Screen::NewChat(NewChatScreen::new()),
             ScreenId::NomadList => Screen::NomadList(NomadListScreen::new()),
             ScreenId::Settings => Screen::Settings(SettingsScreen::new()),
+            ScreenId::SettingsIdentity => Screen::SettingsIdentity(SettingsIdentityScreen::new()),
+            ScreenId::SettingsWifi => Screen::SettingsWifi(SettingsWifiScreen::new()),
             ScreenId::Chat | ScreenId::NomadView => return, // opened with context
         };
         self.push(screen);
@@ -533,6 +605,8 @@ LxmfEvent::ContactDiscovered { address, name } => {
             shared,
             identity_hex,
             display_name,
+            wifi_ssid,
+            notice,
             ..
         } = self;
 
@@ -552,6 +626,8 @@ LxmfEvent::ContactDiscovered { address, name } => {
             page_notice: &page_notice,
             identity_hex: identity_hex.as_str(),
             display_name: display_name.as_str(),
+            notice: notice.as_str(),
+            wifi_ssid: wifi_ssid.as_str(),
             network: NetworkState {
                 connected: shared.connected.load(Ordering::Relaxed),
                 uptime_ms: board.uptime_ms(),

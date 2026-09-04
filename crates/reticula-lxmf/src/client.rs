@@ -55,7 +55,7 @@ pub enum LxmfEvent {
 pub struct LxmfClient {
     transport: Arc<Transport>,
     identity: PrivateIdentity,
-    display_name: String,
+    display_name: std::sync::Mutex<String>,
     delivery: Arc<Mutex<SingleInputDestination>>,
     /// The delivery destination's address hash — the LXMF address peers use
     /// to send us messages.
@@ -88,11 +88,11 @@ impl LxmfClient {
         event_capacity: usize,
     ) -> Self {
         let (events, _) = broadcast::channel(event_capacity);
-        let delivery_address = delivery_destination_address(&identity);
+        let delivery_address = delivery_address_for(&identity);
         Self {
             transport,
             identity,
-            display_name: display_name.into(),
+            display_name: std::sync::Mutex::new(display_name.into()),
             delivery,
             delivery_address,
             store,
@@ -119,13 +119,19 @@ impl LxmfClient {
     }
 
     /// Our display name, as announced to peers.
-    pub fn display_name(&self) -> &str {
-        &self.display_name
+    pub fn display_name(&self) -> String {
+        self.display_name.lock().unwrap().clone()
+    }
+
+    /// Update the display name announced to peers. Takes effect on the next
+    /// [`LxmfClient::announce`].
+    pub fn set_display_name(&self, name: impl Into<String>) {
+        *self.display_name.lock().unwrap() = name.into();
     }
 
     /// Announce the delivery identity so peers can discover a path to us.
     pub async fn announce(&self) {
-        let app_data = delivery_app_data(Some(&self.display_name));
+        let app_data = delivery_app_data(Some(&self.display_name.lock().unwrap()));
         let address = self.delivery.lock().await.desc.address_hash;
         info!("lxmf: announcing delivery destination {address}");
         self.transport
@@ -464,7 +470,10 @@ impl LxmfClient {
 
 /// The address of the `lxmf/delivery` destination for `identity` (our LXMF
 /// address), mirroring how the SDK derives a named destination's address.
-fn delivery_destination_address(identity: &PrivateIdentity) -> AddressHash {
+///
+/// This is the address peers use to send us messages. Used by the client and
+/// by the application to show/refresh the address after an identity change.
+pub fn delivery_address_for(identity: &PrivateIdentity) -> AddressHash {
     let name = DestinationName::new(APP_NAME, DELIVERY_ASPECT);
     AddressHash::new_from_hash(&Hash::new(
         Hash::generator()

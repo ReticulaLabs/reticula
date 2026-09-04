@@ -19,5 +19,5 @@ pub mod app;
 pub mod config;
 pub mod identity;
 
-pub use app::{AppError, ReticulaApp};
+pub use app::{AppError, PersistIdentity, PersistWifi, ReticulaApp};
 pub use config::{NetConfig, TransportKind};

@@ -28,7 +28,7 @@ use getrandom::SysRng;
 use rand_core::UnwrapErr;
 use reticulum_sdk::identity::PrivateIdentity;
 
-use reticula_app::{NetConfig, ReticulaApp, TransportKind};
+use reticula_app::{NetConfig, PersistIdentity, PersistWifi, ReticulaApp, TransportKind};
 use reticula_tdeck::TDeckBoard;
 
 const WIFI_SSID: Option<&str> = option_env!("WIFI_SSID");
@@ -126,6 +126,33 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let identity = load_or_create_identity(&nvs);
     log::info!("identity hash: {}", identity.address_hash());
 
+    // Callbacks the app uses to persist settings changes (identity
+    // regeneration, WiFi credentials) before it asks us to restart.
+    let persist_identity: Option<PersistIdentity> = {
+        let nvs = nvs.clone();
+        Some(Box::new(move |identity: &PrivateIdentity| {
+            match EspNvs::new(nvs.clone(), "reticula", true)
+                .and_then(|mut nvs| nvs.set_str("identity", &identity.to_hex_string()))
+            {
+                Ok(()) => log::info!("identity saved to NVS"),
+                Err(e) => log::warn!("could not save identity to NVS: {e}"),
+            }
+        }))
+    };
+    let persist_wifi: Option<PersistWifi> = {
+        let nvs = nvs.clone();
+        Some(Box::new(move |ssid: &str, password: &str| {
+            let result = EspNvs::new(nvs.clone(), "reticula", true).and_then(|mut nvs| {
+                nvs.set_str("wifi_ssid", ssid)?;
+                nvs.set_str("wifi_pass", password)
+            });
+            match result {
+                Ok(()) => log::info!("WiFi credentials saved to NVS"),
+                Err(e) => log::warn!("could not save WiFi credentials to NVS: {e}"),
+            }
+        }))
+    };
+
     // Optional LoRa radio (SX1262). Configured via build-time env vars; when
     // absent the radio is left unused.
     let lora = match LORA_FREQ.and_then(parse_freq_hz) {
@@ -169,10 +196,25 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("identity: {}", identity.to_hex_string());
 
-    let mut app = ReticulaApp::new(board, identity, "Reticula".to_string(), net)
-        .await
-        .map_err(|e| format!("ReticulaApp::new: {e}"))?;
+    let mut app = ReticulaApp::new(
+        board,
+        identity,
+        "Reticula".to_string(),
+        net,
+        persist_identity,
+        persist_wifi,
+    )
+    .await
+    .map_err(|e| format!("ReticulaApp::new: {e}"))?;
     app.run().await.map_err(|e| format!("app.run: {e}"))?;
+
+    // Identity regenerated or WiFi changed in the settings menu: persist the
+    // change and reboot so it takes effect (the transport is built once with
+    // the boot-time identity / credentials).
+    if app.restart_requested() {
+        log::info!("restarting to apply settings…");
+        unsafe { esp_idf_sys::esp_restart() }
+    }
 
     Ok(())
 }
@@ -206,16 +248,18 @@ fn load_or_create_identity(nvs: &EspDefaultNvsPartition) -> PrivateIdentity {
     identity
 }
 
-/// Connect to WiFi as a station, if credentials are configured.
+/// Connect to WiFi as a station.
 ///
+/// Credentials are taken from NVS (set via the Settings → WiFi menu), falling
+/// back to the build-time `WIFI_SSID` / `WIFI_PASS` environment variables.
 /// Returns the blocking WiFi handle so it stays alive for the app's lifetime.
 fn connect_wifi(
     modem: esp_idf_hal::modem::Modem,
     nvs: EspDefaultNvsPartition,
 ) -> Result<BlockingWifi<EspWifi<'static>>, Box<dyn std::error::Error>> {
-    let Some(ssid) = WIFI_SSID else {
-        return Err("WIFI_SSID not configured".into());
-    };
+    let (ssid, password) = load_wifi_creds(&nvs).or_else(|| {
+        WIFI_SSID.map(|s| (s.to_string(), WIFI_PASS.unwrap_or("").to_string()))
+    }).ok_or_else(|| "WiFi credentials not configured (set WIFI_SSID/WIFI_PASS at build time, or save them in Settings → WiFi)".to_string())?;
 
     let sys_loop = EspSystemEventLoop::take()?;
 
@@ -225,10 +269,10 @@ fn connect_wifi(
     )?;
 
     wifi.set_configuration(&Configuration::Client(ClientConfiguration {
-        ssid: ssid.try_into().unwrap(),
+        ssid: ssid.as_str().try_into().unwrap(),
         bssid: None,
         auth_method: AuthMethod::WPA2Personal,
-        password: WIFI_PASS.unwrap_or("").try_into().unwrap(),
+        password: password.as_str().try_into().unwrap(),
         channel: None,
         ..Default::default()
     }))?;
@@ -239,4 +283,27 @@ fn connect_wifi(
     wifi.wait_netif_up()?;
 
     Ok(wifi)
+}
+
+/// Load WiFi credentials saved via Settings → WiFi from NVS, if present.
+fn load_wifi_creds(nvs: &EspDefaultNvsPartition) -> Option<(String, String)> {
+    let mut nvs = EspNvs::new(nvs.clone(), "reticula", true).ok()?;
+    let mut ssid_buf = [0u8; 64];
+    let ssid = nvs
+        .get_str("wifi_ssid", &mut ssid_buf)
+        .ok()
+        .flatten()?
+        .trim()
+        .to_string();
+    if ssid.is_empty() {
+        return None;
+    }
+    let mut pass_buf = [0u8; 64];
+    let password = nvs
+        .get_str("wifi_pass", &mut pass_buf)
+        .ok()
+        .flatten()
+        .unwrap_or("")
+        .to_string();
+    Some((ssid, password))
 }

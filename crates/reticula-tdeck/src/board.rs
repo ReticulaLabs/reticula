@@ -11,7 +11,7 @@ use esp_idf_hal::i2c::{I2cDriver, I2C0, config::Config as I2cConfig};
 use esp_idf_hal::spi::config::{Config as SpiConfig, MODE_0, MODE_3};
 use esp_idf_hal::spi::{SpiDeviceDriver, SpiDriver, SpiDriverConfig, SPI2};
 use esp_idf_hal::units::*;
-use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
+use esp_idf_svc::wifi::{BlockingWifi, Configuration, EspWifi};
 
 use embedded_graphics::geometry::Size;
 use mipidsi::interface::SpiInterface;
@@ -219,6 +219,15 @@ impl Board for TDeckBoard {
         let connected = wifi.is_connected().unwrap_or(false);
         let rssi = wifi.wifi().get_rssi().map(|r| r as i8).unwrap_or(-100);
         Some((connected, rssi))
+    }
+
+    fn wifi_ssid(&self) -> Option<String> {
+        let wifi = self.wifi.as_ref()?;
+        let conf = wifi.get_configuration().ok()?;
+        match conf {
+            Configuration::Client(c) => Some(c.ssid.as_str().to_string()),
+            _ => None,
+        }
     }
 
     fn delay_ms(&mut self, ms: u32) {

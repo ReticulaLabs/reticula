@@ -7,6 +7,8 @@ pub mod new_chat;
 pub mod nomad_list;
 pub mod nomad_view;
 pub mod settings;
+pub mod settings_identity;
+pub mod settings_wifi;
 
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::pixelcolor::Rgb565;
@@ -24,6 +26,8 @@ use new_chat::NewChatScreen;
 use nomad_list::NomadListScreen;
 use nomad_view::NomadViewScreen;
 use settings::SettingsScreen;
+use settings_identity::SettingsIdentityScreen;
+use settings_wifi::SettingsWifiScreen;
 
 /// The active screen. Rendered through the generic display draw target and
 /// driven by logical keys.
@@ -35,6 +39,8 @@ pub enum Screen {
     NomadList(NomadListScreen),
     NomadView(NomadViewScreen),
     Settings(SettingsScreen),
+    SettingsIdentity(SettingsIdentityScreen),
+    SettingsWifi(SettingsWifiScreen),
 }
 
 impl Screen {
@@ -47,6 +53,8 @@ impl Screen {
             Screen::NomadList(_) => ScreenId::NomadList,
             Screen::NomadView(_) => ScreenId::NomadView,
             Screen::Settings(_) => ScreenId::Settings,
+            Screen::SettingsIdentity(_) => ScreenId::SettingsIdentity,
+            Screen::SettingsWifi(_) => ScreenId::SettingsWifi,
         }
     }
 
@@ -59,6 +67,8 @@ impl Screen {
             Screen::NomadList(s) => s.handle_key(key),
             Screen::NomadView(s) => s.handle_key(key),
             Screen::Settings(s) => s.handle_key(key),
+            Screen::SettingsIdentity(s) => s.handle_key(key),
+            Screen::SettingsWifi(s) => s.handle_key(key),
         }
     }
 
@@ -75,12 +85,20 @@ impl Screen {
             Screen::NomadList(s) => s.render(target, ctx, theme),
             Screen::NomadView(s) => s.render(target, ctx, theme),
             Screen::Settings(s) => s.render(target, ctx, theme),
+            Screen::SettingsIdentity(s) => s.render(target, ctx, theme),
+            Screen::SettingsWifi(s) => s.render(target, ctx, theme),
         }
     }
 
     /// Whether this screen is currently composing text.
     pub fn is_input(&self) -> bool {
-        matches!(self, Screen::Chat(_) | Screen::NewChat(_))
+        matches!(
+            self,
+            Screen::Chat(_)
+                | Screen::NewChat(_)
+                | Screen::SettingsIdentity(_)
+                | Screen::SettingsWifi(_)
+        )
     }
 }
 

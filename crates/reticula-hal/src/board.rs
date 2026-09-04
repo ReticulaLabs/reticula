@@ -1,5 +1,6 @@
 use crate::display::Display;
 use crate::input::Keyboard;
+use alloc::string::String;
 
 /// A complete device board.
 ///
@@ -30,6 +31,11 @@ pub trait Board {
     ///
     /// Returns `None` when the board has no WiFi (e.g. the desktop simulator).
     fn wifi_status(&self) -> Option<(bool, i8)> {
+        None
+    }
+
+    /// The WiFi network SSID currently configured, if the board has WiFi.
+    fn wifi_ssid(&self) -> Option<String> {
         None
     }
 

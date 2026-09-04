@@ -22,7 +22,7 @@ pub mod client;
 pub mod message;
 pub mod store;
 
-pub use client::{LxmfClient, LxmfEvent};
+pub use client::{LxmfClient, LxmfEvent, delivery_address_for};
 pub use message::LxmfMessage;
 pub use store::{Direction, MessageStore};
 

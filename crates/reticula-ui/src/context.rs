@@ -78,5 +78,9 @@ pub struct ViewContext<'a> {
     pub identity_hex: &'a str,
     /// Our configured display name.
     pub display_name: &'a str,
+    /// A transient notice (e.g. "restarting…") shown on the settings screens.
+    pub notice: &'a str,
+    /// The WiFi network SSID currently configured, if any.
+    pub wifi_ssid: &'a str,
     pub network: NetworkState,
 }

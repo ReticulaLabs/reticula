@@ -17,6 +17,8 @@
 //! handheld). New devices only need a new BSP crate implementing these traits.
 #![no_std]
 
+extern crate alloc;
+
 pub mod board;
 pub mod display;
 pub mod input;

@@ -72,7 +72,24 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     info!("identity: {}", identity.to_hex_string());
     info!("display name: {display_name}");
-    let mut app = ReticulaApp::new(board, identity, display_name, net).await?;
+
+    // Persist a regenerated identity back to the identity file so it survives
+    // the app restarting. The simulator has no WiFi, so no WiFi callback.
+    let persist_identity: Option<reticula_app::PersistIdentity> = {
+        let path = identity_path.clone();
+        Some(Box::new(move |identity: &reticulum_sdk::identity::PrivateIdentity| {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            match std::fs::write(&path, identity.to_hex_string()) {
+                Ok(()) => info!("identity saved to {}", path.display()),
+                Err(e) => log::warn!("could not save identity to {}: {e}", path.display()),
+            }
+        }))
+    };
+
+    let mut app =
+        ReticulaApp::new(board, identity, display_name, net, persist_identity, None).await?;
     app.run().await?;
     Ok(())
 }

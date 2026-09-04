@@ -10,6 +10,10 @@ pub enum ScreenId {
     NomadList,
     NomadView,
     Settings,
+    /// Sub-menu: identity info and identity regeneration.
+    SettingsIdentity,
+    /// Sub-menu: WiFi network SSID / password.
+    SettingsWifi,
 }
 
 /// An action the UI asks the application to perform.
@@ -31,6 +35,11 @@ pub enum Command {
     Announce,
     /// Set a new display name for our LXMF delivery identity.
     SetDisplayName(String),
+    /// Generate a brand-new Reticulum identity, persist it, and restart so the
+    /// new LXMF address becomes active.
+    RegenerateIdentity,
+    /// Persist new WiFi credentials and restart so the device reconnects.
+    SaveWifi { ssid: String, password: String },
     /// Navigate back in the screen stack.
     Back,
     /// Quit the application (host simulator).
