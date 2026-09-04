@@ -66,7 +66,14 @@ impl NomadViewScreen {
         let height = size.height as i32;
 
         let header = Rectangle::new(Point::new(0, 0), px(width, theme.line_h));
-        let title = format!("Page {}", &hex(&self.node)[..8]);
+        // Show the node's display name when known, else its address prefix.
+        let fallback = hex(&self.node)[..8].to_string();
+        let node_name = ctx
+            .page_node
+            .filter(|n| !n.name.is_empty())
+            .map(|n| n.name.as_str())
+            .unwrap_or(&fallback);
+        let title = format!("{node_name}");
         widgets::draw_bar(target, header, &title, "", theme.header, theme.header_text, theme).ok();
 
         let body_top = header.size.height as i32;

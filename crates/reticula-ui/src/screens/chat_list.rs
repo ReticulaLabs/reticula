@@ -123,7 +123,13 @@ impl ChatListScreen {
                 },
                 preview_chars,
             );
-            let line = format!("{}{} {}", &conv.peer_hex[..8], marker, preview);
+            // Prefer the peer's display name; fall back to the address prefix.
+            let who = if conv.peer_name.is_empty() {
+                &conv.peer_hex[..8]
+            } else {
+                &conv.peer_name
+            };
+            let line = format!("{}{} {}", who, marker, preview);
 
             let at = Point::new(0, row_y);
             if self.state.selected == i + 1 {

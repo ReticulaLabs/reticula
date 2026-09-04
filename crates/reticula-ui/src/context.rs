@@ -9,6 +9,8 @@ pub struct Conversation {
     pub peer: [u8; 16],
     /// Peer address hash as hex (for display).
     pub peer_hex: String,
+    /// Peer display name, if known (e.g. from its LXMF announce).
+    pub peer_name: String,
     /// Text of the most recent message in this conversation.
     pub last_content: String,
     /// Title of the most recent message, if any.

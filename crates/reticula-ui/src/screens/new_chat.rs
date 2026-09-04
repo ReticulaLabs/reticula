@@ -75,17 +75,19 @@ impl NewChatScreen {
 
         let input_bar = Rectangle::new(Point::new(0, y), px(width, theme.line_h));
         widgets::fill_rect(target, input_bar, theme.surface).ok();
+        widgets::draw_text(target, Point::new(0, y), "> ", theme.accent, theme).ok();
+        let prompt_w = 2 * theme.char_w;
         let text = if self.input.is_empty() {
             "e.g. 00112233445566778899aabbccddeeff"
         } else {
             &self.input
         };
-        let text = widgets::truncate(text, theme.chars_per_line(width - 12));
-        widgets::draw_text(target, Point::new(0, y), &text, theme.text, theme).ok();
+        let text = widgets::truncate(text, theme.chars_per_line(width - 12) - 2);
+        widgets::draw_text(target, Point::new(prompt_w, y), &text, theme.text, theme).ok();
 
         let blink_on = (ctx.network.uptime_ms / 500) % 2 == 0;
         if blink_on && !self.input.is_empty() {
-            let cx = (self.input.chars().count() as i32) * theme.char_w;
+            let cx = prompt_w + (self.input.chars().count() as i32) * theme.char_w;
             widgets::fill_rect(
                 target,
                 Rectangle::new(Point::new(cx, y), px(theme.char_w, theme.line_h)),

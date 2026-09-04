@@ -107,7 +107,21 @@ impl ChatScreen {
         let height = size.height as i32;
 
         let header = Rectangle::new(Point::new(0, 0), px(width, theme.line_h));
-        let title = format!("Chat {}", hex_prefix(&self.peer));
+        // Show the peer's display name when known, else the address prefix.
+        let fallback = hex_prefix(&self.peer);
+        let peer_name = ctx
+            .conversations
+            .iter()
+            .find(|c| c.peer == self.peer)
+            .and_then(|c| {
+                if c.peer_name.is_empty() {
+                    None
+                } else {
+                    Some(c.peer_name.as_str())
+                }
+            })
+            .unwrap_or(&fallback);
+        let title = format!("{peer_name}");
         widgets::draw_bar(target, header, &title, "", theme.header, theme.header_text, theme).ok();
 
         let body_top = header.size.height as i32;
@@ -148,29 +162,39 @@ impl ChatScreen {
                 break;
             }
             if !line.is_empty() {
-                let color = if *incoming { theme.text_dim } else { theme.text };
+                // Incoming messages stand out; outgoing are dimmed.
+                let color = if *incoming { theme.text } else { theme.text_dim };
                 widgets::draw_text(target, Point::new(0, y), line, color, theme).ok();
             }
             y += theme.line_h;
             row += 1;
         }
 
-        // Composer.
+        // Composer with a prompt marker.
         let input_bar = Rectangle::new(Point::new(0, composer_y), px(width, theme.line_h));
         widgets::fill_rect(target, input_bar, theme.surface).ok();
+        widgets::draw_text(target, Point::new(0, composer_y), "> ", theme.accent, theme).ok();
+        let prompt_w = 2 * theme.char_w;
         let text = if self.input.is_empty() {
             "Type a message..."
         } else {
             &self.input
         };
-        let text = widgets::truncate(text, theme.chars_per_line(width - 8));
-        widgets::draw_text(target, Point::new(0, composer_y), &text, theme.text, theme).ok();
+        let text = widgets::truncate(text, theme.chars_per_line(width - 8) - 2);
+        widgets::draw_text(
+            target,
+            Point::new(prompt_w, composer_y),
+            &text,
+            theme.text,
+            theme,
+        )
+        .ok();
 
         // Cursor (blinking).
         let blink_on = (ctx.network.uptime_ms / 500) % 2 == 0;
         if blink_on {
-            let cursor_chars = text.chars().count() as i32;
-            let cx = cursor_chars * theme.char_w;
+            let cursor_chars = self.input.chars().count() as i32;
+            let cx = prompt_w + cursor_chars * theme.char_w;
             widgets::fill_rect(
                 target,
                 Rectangle::new(Point::new(cx, composer_y), px(theme.char_w, theme.line_h)),

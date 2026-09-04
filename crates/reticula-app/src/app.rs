@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use log::{debug, info, warn};
+use log::{info, warn};
 
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -352,21 +352,22 @@ impl<B: Board> ReticulaApp<B> {
                 self.refresh_conversations();
                 self.refresh_messages();
             }
-            LxmfEvent::ContactDiscovered { address, name } => {
+LxmfEvent::ContactDiscovered { address, name } => {
                 let mut contacts = self.shared.contacts.lock().unwrap();
                 if !contacts.iter().any(|c| c.peer == address) {
+                    let name = name.unwrap_or_default();
                     contacts.push(Conversation {
                         peer: address,
                         peer_hex: AddressHash::new(address).to_hex_string(),
-                        last_title: name.unwrap_or_default(),
+                        peer_name: name.clone(),
+                        last_title: name,
                         last_content: String::new(),
                         unread: 0,
                         last_ts: 0.0,
                     });
-                    debug!("reticula: discovered LXMF contact {address:02x?}");
+                    info!("reticula: discovered LXMF contact {address:02x?}");
                 }
                 drop(contacts);
-                info!("reticula: discovered LXMF contact {address:02x?}");
                 self.refresh_conversations();
             }
             LxmfEvent::PeerConnected(_) => {
@@ -419,10 +420,15 @@ impl<B: Board> ReticulaApp<B> {
         drop(last_seen);
 
         // Include LXMF contacts discovered from announces that have no
-        // messages yet, so announced peers show up in the chat list.
+        // messages yet, so announced peers show up in the chat list. Also
+        // build a peer→name map so conversations can show real names.
+        let mut name_by_peer: HashMap<[u8; 16], String> = HashMap::new();
         {
             let contacts = self.shared.contacts.lock().unwrap();
             for c in contacts.iter() {
+                if !c.last_title.is_empty() {
+                    name_by_peer.entry(c.peer).or_insert_with(|| c.last_title.clone());
+                }
                 by_peer.entry(c.peer).or_insert_with(|| {
                     (
                         c.last_content.clone(),
@@ -439,6 +445,7 @@ impl<B: Board> ReticulaApp<B> {
             .map(|(peer, (last_content, last_title, last_ts, unread))| Conversation {
                 peer,
                 peer_hex: AddressHash::new(peer).to_hex_string(),
+                peer_name: name_by_peer.get(&peer).cloned().unwrap_or_default(),
                 last_content,
                 last_title,
                 unread,

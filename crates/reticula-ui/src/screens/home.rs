@@ -64,6 +64,30 @@ impl HomeScreen {
 
         let body_top = header.size.height as i32;
         let mut y = body_top;
+
+        // Device/identity status line.
+        let name = if ctx.display_name.is_empty() {
+            "unnamed".to_string()
+        } else {
+            ctx.display_name.to_string()
+        };
+        let status_line = format!(
+            "{}  |  {} link{}  |  up {}s",
+            name,
+            ctx.network.peer_links,
+            if ctx.network.peer_links == 1 { "" } else { "s" },
+            ctx.network.uptime_ms / 1000,
+        );
+        widgets::draw_text(target, Point::new(0, y), &status_line, theme.text_dim, theme).ok();
+        y += theme.line_h;
+        widgets::fill_rect(
+            target,
+            Rectangle::new(Point::new(0, y), px(width, 1)),
+            theme.border,
+        )
+        .ok();
+        y += 2;
+
         let visible = theme.lines_fit(height - y - theme.line_h);
         self.state.keep_visible(visible);
 
@@ -74,12 +98,13 @@ impl HomeScreen {
             if i >= self.state.scroll + visible {
                 break;
             }
+            let label = format!("{}. {item}", i + 1);
             let row = Point::new(0, y);
             if i == self.state.selected {
                 widgets::draw_highlight(
                     target,
                     row,
-                    item,
+                    &label,
                     width,
                     theme.selection,
                     theme.selection_text,
@@ -87,7 +112,7 @@ impl HomeScreen {
                 )
                 .ok();
             } else {
-                widgets::draw_text(target, row, item, theme.text, theme).ok();
+                widgets::draw_text(target, row, &label, theme.text, theme).ok();
             }
             y += theme.line_h;
         }

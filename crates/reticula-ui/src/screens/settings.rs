@@ -98,14 +98,16 @@ impl SettingsScreen {
             widgets::draw_text(target, Point::new(0, y), "Display name:", theme.text_dim, theme)
                 .ok();
             y += theme.line_h;
-            let text = widgets::truncate(&self.name_input, theme.chars_per_line(width - 12));
+            widgets::draw_text(target, Point::new(0, y), "> ", theme.accent, theme).ok();
+            let prompt_w = 2 * theme.char_w;
+            let text = widgets::truncate(&self.name_input, theme.chars_per_line(width - 12) - 2);
             widgets::fill_rect(
                 target,
-                Rectangle::new(Point::new(0, y), px(width, theme.line_h)),
+                Rectangle::new(Point::new(prompt_w, y), px(width - prompt_w, theme.line_h)),
                 theme.surface,
             )
             .ok();
-            widgets::draw_text(target, Point::new(0, y), &text, theme.text, theme).ok();
+            widgets::draw_text(target, Point::new(prompt_w, y), &text, theme.text, theme).ok();
             y += theme.line_h;
         } else {
             let label = format!("Name: {}", ctx.display_name);

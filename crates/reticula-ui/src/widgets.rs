@@ -44,7 +44,8 @@ where
     .map(|_| ())
 }
 
-/// Draw an inverse (highlighted) line: a filled background with text on top.
+/// Draw an inverse (highlighted) line: a filled background with a leading
+/// cursor marker and text on top.
 pub fn draw_highlight<D>(
     target: &mut D,
     at: Point,
@@ -62,7 +63,11 @@ where
         Rectangle::new(at, px(width, theme.line_h)),
         bg,
     )?;
-    draw_text(target, at, text, fg, theme)
+    // A leading cursor marker makes the selected row obvious.
+    draw_text(target, at, ">", fg, theme)?;
+    let max_chars = theme.chars_per_line(width - theme.char_w);
+    let text = truncate(text, max_chars);
+    draw_text(target, at + Point::new(theme.char_w, 0), &text, fg, theme)
 }
 
 /// Wrap `text` into lines of at most `max_chars` characters.
@@ -131,7 +136,8 @@ where
     Ok(at.y + drawn * theme.line_h)
 }
 
-/// Draw a labelled bar (used for headers and footers).
+/// Draw a labelled bar (used for headers and footers), with a 1-px underline
+/// so it reads as a distinct band.
 pub fn draw_bar<D>(
     target: &mut D,
     rect: Rectangle,
@@ -145,6 +151,15 @@ where
     D: DrawTarget<Color = Rgb565>,
 {
     fill_rect(target, rect, bg)?;
+    // 1-px underline separates the bar from the body below it.
+    fill_rect(
+        target,
+        Rectangle::new(
+            rect.top_left + Point::new(0, rect.size.height as i32 - 1),
+            px(rect.size.width as i32, 1),
+        ),
+        theme.border,
+    )?;
     let text_color = fg;
     // Text is aligned to the 6×10 glyph grid so the terminal simulator can
     // reconstruct characters from the framebuffer.
