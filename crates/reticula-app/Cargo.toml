@@ -23,6 +23,10 @@ log.workspace = true
 # LoRa radio interface (e.g. SX1262) support. Enables the vendored SDK's
 # `lora` feature. Off by default so the desktop simulator doesn't build it.
 lora = ["reticulum-sdk/lora"]
+# Resource-constrained device (e.g. the ESP32-S3 T-Deck). Enables the vendored
+# SDK's `embedded` feature (short packet/destination/path retention). Off by
+# default so the desktop simulator keeps the upstream behaviour.
+embedded = ["reticulum-sdk/embedded"]
 
 [lints]
 workspace = true

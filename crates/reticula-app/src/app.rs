@@ -85,6 +85,7 @@ pub struct ReticulaApp<B: Board> {
     pub theme: Theme,
     lxmf: Arc<LxmfClient>,
     nomad: Arc<NomadClient>,
+    transport: Arc<Transport>,
     store: Arc<std::sync::Mutex<MessageStore>>,
     identity: PrivateIdentity,
     display_name: String,
@@ -124,6 +125,7 @@ impl<B: Board> ReticulaApp<B> {
             theme: Theme::default(),
             lxmf,
             nomad,
+            transport,
             store,
             identity,
             display_name,
@@ -208,11 +210,16 @@ impl<B: Board> ReticulaApp<B> {
             // Periodic heartbeat so a connected serial monitor shows the app
             // is alive and healthy.
             if last_heartbeat.elapsed() >= Duration::from_secs(10) {
+                let m = self.transport.metrics().await;
                 log::info!(
-                    "reticula: alive uptime={}s links={} msgs={}",
+                    "reticula: alive uptime={}s links={} msgs={} sdk[path={} dst={} ann={} anncache={}]",
                     self.board.uptime_ms() / 1000,
                     self.shared.peer_links.load(Ordering::Relaxed),
                     self.store.lock().unwrap().len(),
+                    m.path_table_entries,
+                    m.single_out_destinations_entries,
+                    m.announce_table_entries,
+                    m.announce_cache_entries,
                 );
                 last_heartbeat = Instant::now();
             }

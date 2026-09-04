@@ -16,11 +16,13 @@ rust-version = "1.85"
 embuild = { version = "0.31", features = ["espidf"] }
 
 [dependencies]
-reticula-app = { path = "../crates/reticula-app", features = ["lora"] }
+reticula-app = { path = "../crates/reticula-app", features = ["lora", "embedded"] }
 reticula-tdeck = { path = "../crates/reticula-tdeck" }
-# v2.3.0 gained upstream embedded support; disabling default features keeps
-# the Linux-only tokio-serial/gpio-cdev deps out of the ESP-IDF build.
-reticulum-sdk = { version = "2.3", default-features = false, features = ["alloc", "lora"] }
+# v2.3.1 gained upstream embedded support; disabling default features keeps
+# the Linux-only tokio-serial/gpio-cdev deps out of the ESP-IDF build. The
+# `embedded` feature uses short packet/destination/path retention so the
+# transport state stays bounded in the T-Deck's limited RAM.
+reticulum-sdk = { version = "2.3", default-features = false, features = ["alloc", "lora", "embedded"] }
 # No `signal`/`process`/`full`: signal-hook-registry does not build on ESP-IDF.
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 
@@ -32,10 +34,6 @@ embedded-svc = "0.28"
 log = "0.4"
 
 [patch.crates-io]
-# Vendored fork: embedded-friendly packet-cache retention (see
-# third_party/README.md). The upstream 180 s retention grows without bound on
-# a busy network and exhausts internal RAM on the T-Deck.
-reticulum-sdk = { path = "../third_party/reticulum-sdk" }
 # embuild pins bindgen 0.71.1, which produces broken bindings with modern
 # clang (>= 21); the fork bumps it to 0.72.
 embuild = { path = "../third_party/embuild" }
