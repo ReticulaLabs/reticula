@@ -43,7 +43,12 @@ impl MessageStore {
             self.evict_oldest();
         }
 
-        let peer = message.source_hash;
+        let peer = match direction {
+            // The "peer" of a conversation is the other party: the sender of
+            // an inbound message, or the recipient of an outbound one.
+            Direction::Inbound => message.source_hash,
+            Direction::Outbound => message.destination_hash,
+        };
         let index = self.messages.len();
         self.by_peer.entry(peer).or_default().push(index);
         self.messages.push(Arc::new(message));
@@ -83,7 +88,12 @@ impl MessageStore {
         if self.messages.is_empty() {
             return;
         }
-        let peer = self.messages[0].source_hash;
+        // The removed message is indexed under its peer, which depends on
+        // direction (the other party of the conversation).
+        let peer = match self.direction[0] {
+            Direction::Inbound => self.messages[0].source_hash,
+            Direction::Outbound => self.messages[0].destination_hash,
+        };
         self.messages.remove(0);
         self.direction.remove(0);
         // Every remaining message shifted down one index.
@@ -120,6 +130,25 @@ mod tests {
         assert_eq!(store.len(), 3);
         assert_eq!(store.for_peer(&a).len(), 2);
         assert_eq!(store.for_peer(&b).len(), 1);
+    }
+
+    #[test]
+    fn groups_outbound_by_recipient() {
+        let mut store = MessageStore::new(100);
+        let me = [9u8; 16];
+        let peer = [7u8; 16];
+
+        // We sent to `peer`: the source is us, the destination is the peer.
+        let sent = LxmfMessage::new(peer, me, "", "hello");
+        store.push(sent, Direction::Outbound);
+
+        // Inbound: the peer sent to us.
+        let received = LxmfMessage::new(me, peer, "", "hi");
+        store.push(received, Direction::Inbound);
+
+        // Both belong to the conversation with `peer`, and are found under it.
+        assert_eq!(store.for_peer(&peer).len(), 2);
+        assert_eq!(store.for_peer(&me).len(), 0);
     }
 
     #[test]

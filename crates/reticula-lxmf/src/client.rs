@@ -1,7 +1,7 @@
 //! The LXMF client: announces a delivery identity, receives messages over
 //! links and packets, and sends messages by establishing links to peers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use log::{debug, info, trace, warn};
@@ -13,7 +13,7 @@ use tokio::time::{timeout, Duration};
 use reticulum_sdk::destination::link::{LinkEvent, LinkEventData, LinkId, LinkStatus};
 use reticulum_sdk::destination::{DestinationName, SingleInputDestination};
 use reticulum_sdk::hash::{AddressHash, Hash};
-use reticulum_sdk::identity::PrivateIdentity;
+use reticulum_sdk::identity::{HashIdentity, PrivateIdentity};
 use reticulum_sdk::transport::{AnnounceEvent, ReceivedData, Transport};
 
 use crate::message::LxmfMessage;
@@ -57,12 +57,20 @@ pub struct LxmfClient {
     identity: PrivateIdentity,
     display_name: String,
     delivery: Arc<Mutex<SingleInputDestination>>,
+    /// The delivery destination's address hash — the LXMF address peers use
+    /// to send us messages.
+    delivery_address: AddressHash,
     store: Arc<std::sync::Mutex<MessageStore>>,
     events: broadcast::Sender<LxmfEvent>,
     /// Outbound links we established per peer, keyed by peer address hash.
     links: Mutex<HashMap<AddressHash, LinkId>>,
     /// LXMF delivery destinations discovered from announces, in discovery order.
     discovered: Mutex<Vec<AddressHash>>,
+    /// Hashes of recently received messages. The reference implementation keeps
+    /// a "locally delivered" cache and ignores already-received messages; a
+    /// sender that retransmits an unconfirmed message must not surface as a
+    /// duplicate. Bounded to a small FIFO window.
+    seen: Mutex<VecDeque<[u8; 32]>>,
 }
 
 impl LxmfClient {
@@ -80,15 +88,18 @@ impl LxmfClient {
         event_capacity: usize,
     ) -> Self {
         let (events, _) = broadcast::channel(event_capacity);
+        let delivery_address = delivery_destination_address(&identity);
         Self {
             transport,
             identity,
             display_name: display_name.into(),
             delivery,
+            delivery_address,
             store,
             events,
             links: Mutex::new(HashMap::new()),
             discovered: Mutex::new(Vec::new()),
+            seen: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -104,7 +115,7 @@ impl LxmfClient {
 
     /// The delivery destination's address hash (our LXMF address).
     pub fn delivery_address(&self) -> AddressHash {
-        *self.identity.address_hash()
+        self.delivery_address
     }
 
     /// Our display name, as announced to peers.
@@ -115,6 +126,8 @@ impl LxmfClient {
     /// Announce the delivery identity so peers can discover a path to us.
     pub async fn announce(&self) {
         let app_data = delivery_app_data(Some(&self.display_name));
+        let address = self.delivery.lock().await.desc.address_hash;
+        info!("lxmf: announcing delivery destination {address}");
         self.transport
             .send_announce(&self.delivery, Some(&app_data))
             .await;
@@ -191,7 +204,11 @@ impl LxmfClient {
     ) -> Result<[u8; 32], LxmfError> {
         let mut message = LxmfMessage::new(
             destination_hash,
-            self.identity.address_hash().as_slice().try_into().unwrap(),
+            // The source must be our name-derived delivery address (the LXMF
+            // address), not the identity hash: recipients recall the sender's
+            // identity via `get_out_destination(source_hash)`, which only
+            // knows name-derived destination hashes.
+            self.delivery_address.as_slice().try_into().unwrap(),
             title.into().into_bytes(),
             content.into().into_bytes(),
         );
@@ -215,16 +232,19 @@ impl LxmfClient {
             tokio::select! {
                 ev = in_links.recv() => {
                     if let Ok(ev) = ev {
+                        debug!("lxmf: in-link event");
                         self.handle_link_event(ev).await;
                     }
                 }
                 ev = out_links.recv() => {
                     if let Ok(ev) = ev {
+                        debug!("lxmf: out-link event");
                         self.handle_link_event(ev).await;
                     }
                 }
                 rd = data.recv() => {
                     if let Ok(rd) = rd {
+                        info!("lxmf: received data packet len={}", rd.data.len());
                         self.handle_received_data(rd).await;
                     }
                 }
@@ -329,18 +349,30 @@ impl LxmfClient {
 
     /// Attempt to parse link payload bytes as an LXMF message.
     async fn handle_link_data(&self, _link_id: LinkId, payload: &[u8]) {
+        debug!("lxmf: link data arrived ({len} bytes)", len = payload.len());
         let Some(message) = self.unpack_message(payload).await else {
+            debug!("lxmf: link data could not be unpacked");
             return;
         };
 
-        // Only accept messages addressed to this client.
-        if message.destination_hash != self.identity.address_hash().as_slice()[..] {
-            trace!("lxmf: dropping message not addressed to us");
+        // Only accept messages addressed to this client's LXMF address.
+        let is_ours = message.destination_hash == self.delivery_address.as_slice()[..];
+        if !is_ours {
+            info!(
+                "lxmf: dropping message not addressed to us (dst={:02x?} ours={:02x?})",
+                message.destination_hash,
+                self.delivery_address.as_slice(),
+            );
             return;
         }
 
         if !message.signature_validated {
             warn!("lxmf: message signature could not be validated");
+        }
+
+        if !self.record_seen(message.hash).await {
+            debug!("lxmf: ignoring already-received message (dup={:02x?})", message.hash);
+            return;
         }
 
         let stored = self.store.lock().unwrap().push(message, Direction::Inbound);
@@ -349,6 +381,7 @@ impl LxmfClient {
 
     /// Handle a direct (opportunistic) packet received outside a link.
     async fn handle_received_data(&self, rd: ReceivedData) {
+        debug!("lxmf: opportunistic data from {:02x?} len={}", rd.destination.as_slice(), rd.data.len());
         // The reference implementation re-prepends the packet's destination
         // hash for opportunistic deliveries.
         let mut data = Vec::with_capacity(16 + rd.data.len());
@@ -356,15 +389,38 @@ impl LxmfClient {
         data.extend_from_slice(rd.data.as_slice());
 
         let Some(message) = self.unpack_message(&data).await else {
+            debug!("lxmf: opportunistic data could not be unpacked");
             return;
         };
 
-        if message.destination_hash != self.identity.address_hash().as_slice()[..] {
+        if message.destination_hash != self.delivery_address.as_slice()[..] {
+            debug!("lxmf: opportunistic data not addressed to us");
+            return;
+        }
+
+        if !self.record_seen(message.hash).await {
+            debug!("lxmf: ignoring already-received message (dup={:02x?})", message.hash);
             return;
         }
 
         let stored = self.store.lock().unwrap().push(message, Direction::Inbound);
         let _ = self.events.send(LxmfEvent::MessageReceived(stored));
+    }
+
+    /// Record a received message hash, returning `false` (and not re-recording)
+    /// when the hash was already seen. The cache is a small bounded FIFO so it
+    /// cannot grow without limit.
+    async fn record_seen(&self, hash: [u8; 32]) -> bool {
+        const MAX_SEEN: usize = 256;
+        let mut seen = self.seen.lock().await;
+        if seen.contains(&hash) {
+            return false;
+        }
+        if seen.len() >= MAX_SEEN {
+            seen.pop_front();
+        }
+        seen.push_back(hash);
+        true
     }
 
     /// Unpack message bytes, recalling the source identity when possible.
@@ -404,6 +460,19 @@ impl LxmfClient {
         }
         None
     }
+}
+
+/// The address of the `lxmf/delivery` destination for `identity` (our LXMF
+/// address), mirroring how the SDK derives a named destination's address.
+fn delivery_destination_address(identity: &PrivateIdentity) -> AddressHash {
+    let name = DestinationName::new(APP_NAME, DELIVERY_ASPECT);
+    AddressHash::new_from_hash(&Hash::new(
+        Hash::generator()
+            .chain_update(name.as_name_hash_slice())
+            .chain_update(identity.as_address_hash_slice())
+            .finalize()
+            .into(),
+    ))
 }
 
 /// Announce app-data for a delivery identity: a msgpack list of

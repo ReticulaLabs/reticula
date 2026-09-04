@@ -30,7 +30,7 @@ repository = "https://github.com/kallisti5/reticula"
 rust-version = "1.85"
 
 [workspace.dependencies]
-# v2.3.1 gained the embedded support upstream: the `serial`/`lora` interfaces
+# v2.3.2 gained the embedded support upstream: the `serial`/`lora` interfaces
 # are feature-gated, 64-bit counters use portable-atomic, tokio uses a slimmed
 # feature set, and the `embedded` feature bounds packet/destination/path
 # retention for resource-constrained targets. Default features (which include

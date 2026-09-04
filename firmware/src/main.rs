@@ -21,8 +21,12 @@ use embedded_svc::wifi::{AuthMethod, ClientConfiguration, Configuration};
 
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
-use esp_idf_svc::nvs::EspDefaultNvsPartition;
+use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
 use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
+
+use getrandom::SysRng;
+use rand_core::UnwrapErr;
+use reticulum_sdk::identity::PrivateIdentity;
 
 use reticula_app::{NetConfig, ReticulaApp, TransportKind};
 use reticula_tdeck::TDeckBoard;
@@ -83,6 +87,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("reticula-firmware starting");
 
+    // Take the NVS partition once; WiFi and identity persistence both use it.
+    let nvs = esp_idf_svc::nvs::EspDefaultNvsPartition::take()
+        .map_err(|e| format!("NVS: {e}"))?;
+
     // Take the peripherals once; WiFi needs the modem, the board needs the
     // rest. (A second `Peripherals::take()` would fail with
     // ESP_ERR_INVALID_STATE once the modem is taken.)
@@ -96,7 +104,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 
     // WiFi (best-effort; the device still runs offline). The handle is attached
     // to the board so the UI can report link status and RSSI.
-    let wifi = match connect_wifi(modem) {
+    let wifi = match connect_wifi(modem, nvs.clone()) {
         Ok(wifi) => {
             log::info!("WiFi connected");
             Some(wifi)
@@ -113,9 +121,10 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         board.attach_wifi(wifi);
     }
 
-    // TODO: persist the identity (NVS / SPIFFS). A fresh identity is
-    // generated on every boot until storage is wired up.
-    let identity = reticula_app::identity::load_or_create(None);
+    // Persist the identity in NVS so the LXMF address is stable across boots
+    // (peers cannot reach a device whose address changes every reboot).
+    let identity = load_or_create_identity(&nvs);
+    log::info!("identity hash: {}", identity.address_hash());
 
     // Optional LoRa radio (SX1262). Configured via build-time env vars; when
     // absent the radio is left unused.
@@ -168,18 +177,47 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Persist the identity in NVS so the LXMF address is stable across boots.
+fn load_or_create_identity(nvs: &EspDefaultNvsPartition) -> PrivateIdentity {
+    let mut nvs = match EspNvs::new(nvs.clone(), "reticula", true) {
+        Ok(n) => n,
+        Err(e) => {
+            log::warn!("NVS open failed ({e}); using a fresh identity");
+            return PrivateIdentity::new_from_rand(&mut UnwrapErr(SysRng));
+        }
+    };
+
+    // Try to load an existing identity.
+    let mut buf = [0u8; 256];
+    if let Ok(Some(hex)) = nvs.get_str("identity", &mut buf) {
+        if let Ok(identity) = PrivateIdentity::new_from_hex_string(hex.trim()) {
+            log::info!("identity loaded from NVS");
+            return identity;
+        }
+        log::warn!("ignoring unparsable identity in NVS");
+    }
+
+    // Create and persist a fresh one.
+    let identity = PrivateIdentity::new_from_rand(&mut UnwrapErr(SysRng));
+    match nvs.set_str("identity", &identity.to_hex_string()) {
+        Ok(()) => log::info!("identity saved to NVS"),
+        Err(e) => log::warn!("could not save identity to NVS: {e}"),
+    }
+    identity
+}
+
 /// Connect to WiFi as a station, if credentials are configured.
 ///
 /// Returns the blocking WiFi handle so it stays alive for the app's lifetime.
 fn connect_wifi(
     modem: esp_idf_hal::modem::Modem,
+    nvs: EspDefaultNvsPartition,
 ) -> Result<BlockingWifi<EspWifi<'static>>, Box<dyn std::error::Error>> {
     let Some(ssid) = WIFI_SSID else {
         return Err("WIFI_SSID not configured".into());
     };
 
     let sys_loop = EspSystemEventLoop::take()?;
-    let nvs = EspDefaultNvsPartition::take()?;
 
     let mut wifi = BlockingWifi::wrap(
         EspWifi::new(modem, sys_loop.clone(), Some(nvs))?,

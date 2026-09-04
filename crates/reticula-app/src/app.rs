@@ -37,7 +37,10 @@ use reticula_ui::{Command, Screen, ScreenId, Theme};
 use crate::config::NetConfig;
 
 /// Frame pacing of the UI loop.
-pub const FRAME_MS: u64 = 50;
+/// Frame/input poll interval. Kept short so the trackball (polled here) picks
+/// up quick movements; the render is cheap on static screens (the framebuffer
+/// is only pushed to the panel when it changes).
+pub const FRAME_MS: u64 = 25;
 /// Maximum number of messages kept in memory.
 pub const MAX_MESSAGES: usize = 512;
 
@@ -123,7 +126,9 @@ impl<B: Board> ReticulaApp<B> {
             64,
         ));
         let nomad = Arc::new(NomadClient::new(transport.clone(), 64));
-        let identity_hex = identity.to_hex_string();
+        // Show the LXMF delivery address (what peers use to message us), not
+        // the raw identity key hex.
+        let identity_hex = lxmf.delivery_address().to_hex_string();
 
         Ok(Self {
             board,
@@ -190,11 +195,14 @@ impl<B: Board> ReticulaApp<B> {
             }
         });
 
-        // Periodic announce task.
+        // Periodic announce task. Wait a few seconds for the network interfaces
+        // (the TCP peer) to come up before the first announce, otherwise it is
+        // broadcast before the connection exists and never reaches the mesh.
         tokio::spawn({
             let lxmf = self.lxmf.clone();
             let interval = self.announce_interval();
             async move {
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 lxmf.announce().await;
                 loop {
                     tokio::time::sleep(interval).await;
@@ -277,8 +285,9 @@ impl<B: Board> ReticulaApp<B> {
     }
 
     fn announce_interval(&self) -> Duration {
-        // Fixed 5-minute cadence; could come from NetConfig later.
-        Duration::from_secs(300)
+        // Re-announce every minute so peers that just connected (or whose
+        // contact cache expired) can still discover us.
+        Duration::from_secs(60)
     }
 
     fn execute(&mut self, cmd: Command) {
@@ -576,6 +585,12 @@ async fn build_transport(
     // (7 channels), which exceeds the T-Deck's 8 MB PSRAM. The end-client is
     // low-throughput, so a small ring is plenty.
     config.set_event_channel_capacity(512);
+    // Prove received link data messages (per-message acknowledgements sent
+    // back over the same link). The reference LXMF delivery destination always
+    // proves link-delivered messages, and senders rely on those proofs to
+    // confirm delivery — without them a peer retransmits and we receive
+    // duplicates, while it never learns the message arrived.
+    config.set_prove_link_messages(true);
 
     let mut transport = Transport::new(config);
 
@@ -590,17 +605,18 @@ async fn build_transport(
             info!("reticulum: UDP interface bound to {bind}");
         }
         crate::TransportKind::TcpPeer { addr } => {
-            // Access-point mode: the device is a pure client, so it keeps no
-            // routing/path state for others, reducing memory use on the busy
-            // TCP network.
+            // Roaming mode: allows our own announces to propagate (AccessPoint
+            // mode blocks *all* announces on the interface, including local
+            // ones, so peers could never discover us or reply). Paths still
+            // expire quickly, keeping memory bounded on the busy network.
             let iface = TcpClient::new(addr.to_string())
-                .with_interface_mode(InterfaceMode::AccessPoint);
+                .with_interface_mode(InterfaceMode::Roaming);
             transport
                 .iface_manager()
                 .lock()
                 .await
                 .spawn(iface, TcpClient::spawn);
-            info!("reticulum: TCP client interface to {addr} (access point mode)");
+            info!("reticulum: TCP client interface to {addr} (roaming mode)");
         }
         crate::TransportKind::None => {
             info!("reticulum: no network interface configured (offline)");

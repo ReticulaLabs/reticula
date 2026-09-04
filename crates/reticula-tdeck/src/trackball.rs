@@ -7,8 +7,10 @@ use esp_idf_hal::gpio::{Gpio0, Gpio1, Gpio2, Gpio3, Gpio15, Input, PinDriver, Pu
 use reticula_hal::input::{KeyCode, KeyEvent, Keyboard};
 
 /// Ignore further edges for this long after accepting one, debouncing the
-/// mechanical contacts.
-const DEBOUNCE: Duration = Duration::from_millis(60);
+/// mechanical contacts. Kept short so quick ball movements register; the
+/// app polls input every frame (well above this), so it mostly guards
+/// against contact bounce within a single poll.
+const DEBOUNCE: Duration = Duration::from_millis(15);
 
 /// Reads the T-Deck trackball from its five GPIO lines.
 ///

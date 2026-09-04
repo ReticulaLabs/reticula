@@ -129,12 +129,11 @@ impl ChatScreen {
         let body = Rectangle::new(Point::new(0, body_top), px(width, status_y - body_top));
 
         // Build the flattened message rows.
-        let max_chars = theme.chars_per_line(width - 8);
+        let max_chars = theme.chars_per_line(width - 10);
         let mut rows: Vec<(bool, String)> = Vec::new();
         for msg in ctx.messages {
             for line in widgets::wrap(&msg.content, max_chars) {
-                let prefix = if msg.incoming { "<" } else { ">" };
-                rows.push((msg.incoming, format!("{prefix} {line}")));
+                rows.push((msg.incoming, line));
             }
             if !rows.is_empty() {
                 rows.push((false, String::new())); // spacer
@@ -161,9 +160,27 @@ impl ChatScreen {
                 break;
             }
             if !line.is_empty() {
-                // Incoming messages stand out; outgoing are dimmed.
-                let color = if *incoming { theme.text } else { theme.text_dim };
-                widgets::draw_text(target, Point::new(0, y), line, color, theme).ok();
+                if *incoming {
+                    // Received messages sit on the left, with a left accent bar.
+                    widgets::fill_rect(
+                        target,
+                        Rectangle::new(Point::new(0, y), px(2, theme.line_h)),
+                        theme.accent,
+                    )
+                    .ok();
+                    widgets::draw_text(target, Point::new(4, y), line, theme.text, theme).ok();
+                } else {
+                    // Sent messages sit on the right, with a right accent bar.
+                    let text_w = line.chars().count() as i32 * theme.char_w;
+                    let x = (width - 5 - text_w).max(4);
+                    widgets::draw_text(target, Point::new(x, y), line, theme.text, theme).ok();
+                    widgets::fill_rect(
+                        target,
+                        Rectangle::new(Point::new(width - 2, y), px(2, theme.line_h)),
+                        theme.accent,
+                    )
+                    .ok();
+                }
             }
             y += theme.line_h;
             row += 1;
