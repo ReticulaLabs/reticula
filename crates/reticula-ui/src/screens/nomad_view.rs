@@ -2,7 +2,7 @@
 
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::geometry::Point;
-use embedded_graphics::pixelcolor::Rgb565;
+use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use embedded_graphics::primitives::Rectangle;
 
 use reticula_hal::KeyCode;
@@ -74,6 +74,10 @@ impl NomadViewScreen {
             Point::new(0, body_top),
             px(width, height - body_top - theme.line_h),
         );
+        // The page area is rendered terminal-style: black background, white
+        // text (independent of the app theme).
+        let page_bg = Rgb565::BLACK;
+        target.fill_solid(&body, page_bg).ok();
         let visible = theme.lines_fit(body.size.height as i32);
 
         let Some(page) = ctx.page else {
@@ -82,7 +86,7 @@ impl NomadViewScreen {
             } else {
                 ctx.page_notice.to_string()
             };
-            widgets::draw_text(target, Point::new(0, body_top), &notice, theme.text_dim, theme)
+            widgets::draw_text(target, Point::new(0, body_top), &notice, Rgb565::WHITE, theme)
                 .ok();
             return;
         };
@@ -99,12 +103,7 @@ impl NomadViewScreen {
             if drawn >= visible {
                 break;
             }
-            let color = match line.style {
-                PageStyle::Heading(l) if l <= 2 => theme.accent,
-                PageStyle::Heading(_) => theme.primary,
-                PageStyle::Emphasized => theme.text,
-                PageStyle::Normal => theme.text,
-            };
+            let color = Rgb565::WHITE;
             let text = widgets::truncate(&line.text, max_chars);
             widgets::draw_text(target, Point::new(0, y), &text, color, theme).ok();
             y += theme.line_h;

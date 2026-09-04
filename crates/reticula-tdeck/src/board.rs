@@ -15,7 +15,7 @@ use esp_idf_hal::units::*;
 use embedded_graphics::geometry::Size;
 use mipidsi::interface::SpiInterface;
 use mipidsi::models::ST7789;
-use mipidsi::options::{Orientation, Rotation};
+use mipidsi::options::{ColorInversion, Orientation, Rotation};
 use mipidsi::{Builder, NoResetPin};
 
 use embedded_hal::delay::DelayNs;
@@ -118,6 +118,11 @@ impl TDeckBoard {
         let interface = SpiInterface::new(lcd_device, dc, buffer);
 
         let mut display = Builder::new(ST7789, interface)
+            // The T-Deck's ST7789 panel is a non-IPS variant that displays
+            // inverted colours unless INVON (0x21) is sent (the board's own
+            // init sequence includes it). mipidsi defaults to Normal, which
+            // shows black as white.
+            .invert_colors(ColorInversion::Inverted)
             .init(&mut Ets)
             .map_err(lcd_init_error)?;
         // The panel is mounted sideways; rotate for landscape 320×240.
