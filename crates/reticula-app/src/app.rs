@@ -646,6 +646,12 @@ async fn build_transport(
             DestinationName::new(APP_NAME, DELIVERY_ASPECT),
         )
         .await;
+    // Prove opportunistic (link-less) packets addressed to the delivery
+    // destination too, not just messages arriving over links. The reference
+    // LXMF delivery destination always proves received packets (its packet
+    // callback calls `packet.prove()`); senders wait for these proofs to
+    // confirm delivery, and without them they retransmit.
+    delivery.lock().await.set_prove_packets(true);
     Ok((Arc::new(transport), delivery))
 }
 
