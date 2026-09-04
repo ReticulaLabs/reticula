@@ -122,7 +122,7 @@ impl NomadViewScreen {
         );
         let hint = match &self.current_link {
             Some(link) => format!("ENTER {}", link.label),
-            None => "UP/DOWN scroll | ESC back".to_string(),
+            None => "UP/DOWN scroll | ALT+Backspace".to_string(),
         };
         widgets::draw_bar(
             target,

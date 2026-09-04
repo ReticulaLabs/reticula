@@ -115,7 +115,7 @@ impl HomeScreen {
             px(width, theme.line_h),
         );
         let short = widgets::truncate(ctx.identity_hex, 12);
-        widgets::draw_bar(target, footer, "ESC back", &short, theme.surface, theme.text_dim, theme)
+        widgets::draw_bar(target, footer, "ALT+Backspace back", &short, theme.surface, theme.text_dim, theme)
             .ok();
     }
 }

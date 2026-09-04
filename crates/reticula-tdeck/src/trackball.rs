@@ -18,9 +18,12 @@ const DEBOUNCE: Duration = Duration::from_millis(60);
 /// into the same logical keys the UI already understands:
 ///
 /// * up → `Up`, down → `Down` (cursor movement)
-/// * left → `Esc` (swipe left goes back a page)
-/// * right → `Right`
-/// * click → `Enter` (select)
+/// * left → `Left`
+    /// * right → `Right`
+    /// * click → `Enter` (select)
+    ///
+    /// Going back is done with the keyboard shortcut Alt+Backspace, not a
+    /// trackball gesture.
 pub struct TdeckTrackball {
     up: PinDriver<'static, Gpio3, Input>,
     down: PinDriver<'static, Gpio15, Input>,
@@ -101,8 +104,10 @@ impl Keyboard for TdeckTrackball {
             if right && !self.prev_right {
                 push(KeyCode::Right);
             }
+            // Left swipe no longer triggers "back" (use Alt+Backspace on the
+            // keyboard instead); it reports a plain left arrow.
             if left && !self.prev_left {
-                push(KeyCode::Esc);
+                push(KeyCode::Left);
             }
             if click && !self.prev_click {
                 push(KeyCode::Enter);

@@ -207,6 +207,10 @@ impl<B: Board> ReticulaApp<B> {
 
         let mut key_events = [KeyEvent::pressed(KeyCode::Unknown(0)); 16];
         let mut last_heartbeat = Instant::now();
+        // Ctrl/Alt are held between their press and release; Backspace pressed
+        // while either is held means "back" (Ctrl+Backspace / Alt+Backspace).
+        let mut ctrl_held = false;
+        let mut alt_held = false;
         while !self.quit {
             // Input: keyboard plus any trackball/pointer device.
             let mut n = self.board.keyboard().read(&mut key_events);
@@ -215,8 +219,26 @@ impl<B: Board> ReticulaApp<B> {
             }
             for ev in key_events.iter().take(n) {
                 if ev.state == KeyState::Pressed {
-                    let cmd = self.screen.handle_key(ev.code);
-                    self.execute(cmd);
+                    match ev.code {
+                        KeyCode::Ctrl => ctrl_held = true,
+                        KeyCode::Alt => alt_held = true,
+                        KeyCode::Backspace if ctrl_held || alt_held => {
+                            // Modifier+Backspace goes back on any screen.
+                            info!("input: back (Ctrl/Alt+Backspace)");
+                            let cmd = self.screen.handle_key(KeyCode::Esc);
+                            self.execute(cmd);
+                        }
+                        code => {
+                            let cmd = self.screen.handle_key(code);
+                            self.execute(cmd);
+                        }
+                    }
+                } else if ev.state == KeyState::Released {
+                    match ev.code {
+                        KeyCode::Ctrl => ctrl_held = false,
+                        KeyCode::Alt => alt_held = false,
+                        _ => {}
+                    }
                 }
             }
 

@@ -169,9 +169,9 @@ impl NomadListScreen {
             px(width, theme.line_h),
         );
         let hint = if self.filter.is_empty() {
-            "TYPE to search | ENTER browse | ESC back"
+            "TYPE to search | ENTER browse | ALT+Backspace"
         } else {
-            "filtering | ENTER browse | ESC back"
+            "filtering | ENTER browse | ALT+Backspace"
         };
         widgets::draw_bar(
             target,

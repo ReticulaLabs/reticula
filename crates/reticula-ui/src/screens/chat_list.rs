@@ -219,9 +219,9 @@ impl ChatListScreen {
             px(width, theme.line_h),
         );
         let hint = if self.filter.is_empty() {
-            "TYPE to search | ENTER open | ESC back"
+            "TYPE to search | ENTER open | ALT+Backspace"
         } else {
-            "filtering | ENTER open | ESC back"
+            "filtering | ENTER open | ALT+Backspace"
         };
         widgets::draw_bar(
             target,

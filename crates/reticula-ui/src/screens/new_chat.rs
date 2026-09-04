@@ -102,7 +102,7 @@ impl NewChatScreen {
         widgets::draw_text(
             target,
             Point::new(0, y),
-            "ENTER to start chat | ESC back",
+            "ENTER to start chat | ALT+Backspace",
             theme.text_dim,
             theme,
         )
