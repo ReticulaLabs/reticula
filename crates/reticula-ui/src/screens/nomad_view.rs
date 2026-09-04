@@ -6,7 +6,7 @@ use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use embedded_graphics::primitives::Rectangle;
 
 use reticula_hal::KeyCode;
-use reticula_nomad::{Link, PageStyle};
+use reticula_nomad::Link;
 
 use crate::command::Command;
 use crate::context::ViewContext;

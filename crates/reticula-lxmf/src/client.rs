@@ -4,17 +4,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use log::{debug, trace, warn};
+use log::{debug, info, trace, warn};
 use rmpv::Value;
+use sha2::Digest;
 use tokio::sync::{broadcast, Mutex};
 use tokio::time::{timeout, Duration};
 
-
 use reticulum_sdk::destination::link::{LinkEvent, LinkEventData, LinkId, LinkStatus};
-use reticulum_sdk::destination::SingleInputDestination;
-use reticulum_sdk::hash::AddressHash;
+use reticulum_sdk::destination::{DestinationName, SingleInputDestination};
+use reticulum_sdk::hash::{AddressHash, Hash};
 use reticulum_sdk::identity::PrivateIdentity;
-use reticulum_sdk::transport::{ReceivedData, Transport};
+use reticulum_sdk::transport::{AnnounceEvent, ReceivedData, Transport};
 
 use crate::message::LxmfMessage;
 use crate::store::{Direction, MessageStore};
@@ -34,6 +34,8 @@ pub enum LxmfEvent {
     MessageReceived(Arc<LxmfMessage>),
     /// An outbound message was handed to the transport for delivery.
     MessageSent(Arc<LxmfMessage>),
+    /// A peer announced its `lxmf/delivery` destination (a chat contact).
+    ContactDiscovered { address: [u8; 16], name: Option<String> },
     /// A link to or from a peer became active.
     PeerConnected(AddressHash),
     /// A link to or from a peer closed.
@@ -59,6 +61,8 @@ pub struct LxmfClient {
     events: broadcast::Sender<LxmfEvent>,
     /// Outbound links we established per peer, keyed by peer address hash.
     links: Mutex<HashMap<AddressHash, LinkId>>,
+    /// LXMF delivery destinations discovered from announces, in discovery order.
+    discovered: Mutex<Vec<AddressHash>>,
 }
 
 impl LxmfClient {
@@ -84,6 +88,7 @@ impl LxmfClient {
             store,
             events,
             links: Mutex::new(HashMap::new()),
+            discovered: Mutex::new(Vec::new()),
         }
     }
 
@@ -117,6 +122,61 @@ impl LxmfClient {
             "lxmf: announced delivery destination {}",
             self.identity.address_hash()
         );
+    }
+
+    /// The address hash of the `lxmf/delivery` destination that `identity`
+    /// would announce. Used to recognise LXMF delivery announces.
+    pub fn lxmf_address_for(identity: &[u8; 16]) -> AddressHash {
+        let name = DestinationName::new(APP_NAME, DELIVERY_ASPECT);
+        let full: [u8; 32] = Hash::generator()
+            .chain_update(name.as_name_hash_slice())
+            .chain_update(identity)
+            .finalize()
+            .into();
+        AddressHash::new_from_hash(&Hash::new(full))
+    }
+
+    /// Whether an announce event is for an `lxmf/delivery` destination.
+    pub async fn is_lxmf_delivery(announce: &AnnounceEvent) -> bool {
+        let dest = announce.destination.lock().await;
+        let Ok(identity_hash) = dest
+            .desc
+            .identity
+            .address_hash
+            .as_slice()
+            .try_into()
+        else {
+            return false;
+        };
+        let expected = Self::lxmf_address_for(&identity_hash);
+        dest.desc.address_hash == expected
+    }
+
+    /// Addresses of LXMF delivery destinations discovered so far.
+    pub async fn discovered(&self) -> Vec<AddressHash> {
+        self.discovered.lock().await.clone()
+    }
+
+    /// The long-running discovery loop. Watches for `lxmf/delivery` announces
+    /// so chat contacts show up without requiring an inbound message first.
+    pub async fn run_discovery(&self) -> Result<(), LxmfError> {
+        let mut announces = self.transport.recv_announces().await;
+        while let Ok(announce) = announces.recv().await {
+            if Self::is_lxmf_delivery(&announce).await {
+                let address = announce.destination.lock().await.desc.address_hash;
+                let name = delivery_name(&announce);
+                let mut seen = self.discovered.lock().await;
+                if !seen.contains(&address) {
+                    seen.push(address);
+                    info!("lxmf: discovered contact {address} ({name:?})");
+                    let _ = self.events.send(LxmfEvent::ContactDiscovered {
+                        address: address.as_slice().try_into().unwrap(),
+                        name,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Send a message to a peer by LXMF address hash.
@@ -355,4 +415,25 @@ fn delivery_app_data(display_name: Option<&str>) -> Vec<u8> {
     // Supported functionality: SF_COMPRESSION = 0x00 (not enabled in MVP).
     let data = vec![name, Value::Nil, Value::Array(vec![Value::Integer(0.into())])];
     rmp_serde::to_vec(&data).unwrap_or_default()
+}
+
+/// Display name from an LXMF delivery announce's app data (a msgpack
+/// `[name, stamp_cost, functionality]` list). Returns `None` when unnamed.
+fn delivery_name(announce: &AnnounceEvent) -> Option<String> {
+    let value: Option<Value> =
+        rmpv::decode::read_value(&mut announce.app_data.as_slice()).ok();
+    let first = match value {
+        Some(Value::Array(items)) => items.first().cloned(),
+        _ => None,
+    };
+    let name = match first {
+        Some(Value::Binary(b)) => String::from_utf8_lossy(&b).into_owned(),
+        Some(Value::String(s)) => s.to_string(),
+        _ => return None,
+    };
+    if name.trim().is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }

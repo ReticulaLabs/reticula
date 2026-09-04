@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -66,6 +66,9 @@ impl core::error::Error for AppError {}
 struct SharedState {
     conversations: std::sync::Mutex<Vec<Conversation>>,
     messages: std::sync::Mutex<Vec<ChatMessage>>,
+    /// LXMF contacts discovered from `lxmf/delivery` announces, even without
+    /// any messages yet. Merged into `conversations` at render refresh time.
+    contacts: std::sync::Mutex<Vec<Conversation>>,
     nodes: std::sync::Mutex<Vec<NodeEntry>>,
     page: std::sync::Mutex<Option<Page>>,
     page_node: std::sync::Mutex<Option<NodeEntry>>,
@@ -154,6 +157,15 @@ impl<B: Board> ReticulaApp<B> {
             async move {
                 if let Err(e) = lxmf.run().await {
                     warn!("lxmf client stopped: {e}");
+                }
+            }
+        });
+        // LXMF contact discovery (watch for `lxmf/delivery` announces).
+        tokio::spawn({
+            let lxmf = self.lxmf.clone();
+            async move {
+                if let Err(e) = lxmf.run_discovery().await {
+                    warn!("lxmf discovery stopped: {e}");
                 }
             }
         });
@@ -340,6 +352,23 @@ impl<B: Board> ReticulaApp<B> {
                 self.refresh_conversations();
                 self.refresh_messages();
             }
+            LxmfEvent::ContactDiscovered { address, name } => {
+                let mut contacts = self.shared.contacts.lock().unwrap();
+                if !contacts.iter().any(|c| c.peer == address) {
+                    contacts.push(Conversation {
+                        peer: address,
+                        peer_hex: AddressHash::new(address).to_hex_string(),
+                        last_title: name.unwrap_or_default(),
+                        last_content: String::new(),
+                        unread: 0,
+                        last_ts: 0.0,
+                    });
+                    debug!("reticula: discovered LXMF contact {address:02x?}");
+                }
+                drop(contacts);
+                info!("reticula: discovered LXMF contact {address:02x?}");
+                self.refresh_conversations();
+            }
             LxmfEvent::PeerConnected(_) => {
                 self.shared.peer_links.fetch_add(1, Ordering::Relaxed);
             }
@@ -388,6 +417,22 @@ impl<B: Board> ReticulaApp<B> {
             }
         }
         drop(last_seen);
+
+        // Include LXMF contacts discovered from announces that have no
+        // messages yet, so announced peers show up in the chat list.
+        {
+            let contacts = self.shared.contacts.lock().unwrap();
+            for c in contacts.iter() {
+                by_peer.entry(c.peer).or_insert_with(|| {
+                    (
+                        c.last_content.clone(),
+                        c.last_title.clone(),
+                        c.last_ts,
+                        0,
+                    )
+                });
+            }
+        }
 
         let mut conversations: Vec<Conversation> = by_peer
             .into_iter()

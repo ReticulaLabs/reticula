@@ -293,7 +293,6 @@ fn inline(raw: &str, source: &str) -> (String, PageStyle, Vec<Link>) {
                     }
                     '`' => {
                         // End the formatting block.
-                        mode = Mode::Text;
                         i += 1;
                     }
                     'F' => {
@@ -466,7 +465,7 @@ fn parse_link(
         label: label.trim().to_string(),
         target,
     });
-    end + 1
+    end_index
 }
 
 /// Normalise a link target to a navigable `rns://` URL where possible.
