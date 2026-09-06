@@ -2,6 +2,8 @@
 
 use reticula_nomad::page::Page;
 
+use crate::command::LoraSettings;
+
 /// A conversation in the chat list.
 #[derive(Debug, Clone, Default)]
 pub struct Conversation {
@@ -82,5 +84,7 @@ pub struct ViewContext<'a> {
     pub notice: &'a str,
     /// The WiFi network SSID currently configured, if any.
     pub wifi_ssid: &'a str,
+    /// The currently configured LoRa radio settings, if any.
+    pub lora_settings: Option<&'a LoraSettings>,
     pub network: NetworkState,
 }

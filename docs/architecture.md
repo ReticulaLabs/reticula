@@ -179,13 +179,18 @@ so their `tokio-serial`/`serialport` and Linux-only `gpio-cdev` dependencies
 drop out of embedded builds; `AtomicU64` uses `portable-atomic` (no hardware
 64-bit CAS on the ESP32-S3); the tokio feature set is slimmed; and the LoRa
 interface supports an `embedded-hal` SPI + GPIO backend. The project uses it
-directly from crates.io with `default-features = false`.
+from crates.io with `default-features = false`.
 
-The one remaining vendored fork is `embuild` (`third_party/`, wired in via
-`[patch.crates-io]` in `firmware/Cargo.toml`): it bumps `bindgen` to 0.72 —
-bindgen < 0.72.1 emits broken bindings (`_address` placeholder structs) with
-clang ≥ 21, which breaks `esp-idf-sys` bindings on systems with a modern
-system libclang.
+Two vendored forks are wired in via `[patch.crates-io]`:
+
+* `reticulum-sdk` (`third_party/`): runs the LoRa chipset work (open/init, RX
+  IRQ polling, transmit) on the tokio worker instead of `spawn_blocking`. On
+  the ESP32, blocking-pool threads need a large OS stack allocated from
+  internal RAM (ESP-IDF pthreads are hardcoded to `MALLOC_CAP_INTERNAL`), which
+  fails with ENOMEM once WiFi/TCP/worker stacks are in use.
+* `embuild` (`third_party/`): bumps `bindgen` to 0.72 — bindgen < 0.72.1 emits
+  broken bindings (`_address` placeholder structs) with clang ≥ 21, which
+  breaks `esp-idf-sys` bindings on systems with a modern system libclang.
 
 `tools/build-esp32.sh` also points `bindgen` at the `esp-clang` bundled with
 the toolchain (`LIBCLANG_PATH`) as a further safeguard.
@@ -196,7 +201,9 @@ The T-Deck's SX1262 (CS=9, BUSY=13, RST=17, DIO1=45) shares the SPI2 bus with
 the LCD. `reticula-tdeck` exposes the radio through `TDeckBoard::lora_hw()` (an
 `embedded-hal`-based `LoRaHwProvider`); `reticula-app`'s `lora` feature spawns
 a `LoRaInterface<SX1262>` when `NetConfig::lora` is set. The firmware enables
-it at build time with `LORA_FREQ=<hz>`.
+it at build time with `LORA_FREQ=<hz>`, or at runtime from Settings → LoRa
+(frequency kHz, bandwidth kHz, spreading factor, coding rate, TX power, and an
+enable/disable toggle), persisted to NVS and applied on the next boot.
 
 ### Memory
 

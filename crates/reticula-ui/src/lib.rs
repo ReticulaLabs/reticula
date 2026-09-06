@@ -20,7 +20,7 @@ pub mod screens;
 pub mod theme;
 pub mod widgets;
 
-pub use command::{Command, ScreenId};
+pub use command::{Command, LoraSettings, ScreenId};
 pub use context::{ChatMessage, Conversation, NetworkState, NodeEntry, ViewContext};
 pub use screens::Screen;
 pub use theme::Theme;

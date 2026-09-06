@@ -28,7 +28,7 @@ use getrandom::SysRng;
 use rand_core::UnwrapErr;
 use reticulum_sdk::identity::PrivateIdentity;
 
-use reticula_app::{NetConfig, PersistIdentity, PersistWifi, ReticulaApp, TransportKind};
+use reticula_app::{LoraSettings, NetConfig, PersistIdentity, PersistLora, PersistWifi, ReticulaApp, TransportKind};
 use reticula_tdeck::TDeckBoard;
 
 const WIFI_SSID: Option<&str> = option_env!("WIFI_SSID");
@@ -152,28 +152,64 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }))
     };
-
-    // Optional LoRa radio (SX1262). Configured via build-time env vars; when
-    // absent the radio is left unused.
-    let lora = match LORA_FREQ.and_then(parse_freq_hz) {
-        Some(frequency) => {
-            let hw = board
-                .lora_hw()
-                .ok_or("board has no LoRa hardware")?;
-            Some(
-                reticulum_sdk::iface::lora::LoRaConfig::new(
-                    "", // hardware provider supplies the bus
-                    frequency,
-                    LORA_BANDWIDTH,
-                    LORA_TX_POWER,
-                    LORA_SPREADING_FACTOR,
-                    LORA_CODING_RATE,
-                )
-                .with_embedded_hw(hw),
-            )
-        }
-        None => None,
+    let persist_lora: Option<PersistLora> = {
+        let nvs = nvs.clone();
+        Some(Box::new(move |settings: &LoraSettings| {
+            let result = EspNvs::new(nvs.clone(), "reticula", true).and_then(|mut nvs| {
+                nvs.set_str("lora_enabled", if settings.enabled { "1" } else { "0" })?;
+                nvs.set_str("lora_freq", &settings.frequency_hz.to_string())?;
+                nvs.set_str("lora_bw", &settings.bandwidth_hz.to_string())?;
+                nvs.set_str("lora_sf", &settings.spreading_factor.to_string())?;
+                nvs.set_str("lora_cr", &settings.coding_rate.to_string())?;
+                nvs.set_str("lora_txp", &settings.tx_power_dbm.to_string())
+            });
+            match result {
+                Ok(()) => log::info!("LoRa settings saved to NVS"),
+                Err(e) => log::warn!("could not save LoRa settings to NVS: {e}"),
+            }
+        }))
     };
+
+    // Optional LoRa radio (SX1262). Configured at build time via env vars, or at
+// runtime from Settings → LoRa (persisted to NVS). When absent the radio is
+// left unused.
+let lora_settings = load_lora_settings(&nvs).or_else(|| {
+    LORA_FREQ.and_then(parse_freq_hz).map(|frequency| LoraSettings {
+        enabled: true,
+        frequency_hz: frequency,
+        bandwidth_hz: LORA_BANDWIDTH as u64,
+        spreading_factor: LORA_SPREADING_FACTOR,
+        coding_rate: LORA_CODING_RATE,
+        tx_power_dbm: LORA_TX_POWER,
+    })
+});
+let lora = match lora_settings {
+    Some(settings) if settings.enabled => {
+        let hw = board
+            .lora_hw()
+            .ok_or("board has no LoRa hardware")?;
+        log::info!(
+            "LoRa enabled: {} MHz, {} kHz, SF{}, CR4/{}, {} dBm",
+            settings.frequency_hz / 1_000_000,
+            settings.bandwidth_hz / 1000,
+            settings.spreading_factor,
+            settings.coding_rate,
+            settings.tx_power_dbm,
+        );
+        Some(
+            reticulum_sdk::iface::lora::LoRaConfig::new(
+                "", // hardware provider supplies the bus
+                settings.frequency_hz,
+                settings.bandwidth_hz as f64,
+                settings.tx_power_dbm,
+                settings.spreading_factor,
+                settings.coding_rate,
+            )
+            .with_embedded_hw(hw),
+        )
+    }
+    _ => None,
+};
 
     let net = NetConfig {
         transport: match RNS_PEER {
@@ -203,6 +239,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         net,
         persist_identity,
         persist_wifi,
+        persist_lora,
     )
     .await
     .map_err(|e| format!("ReticulaApp::new: {e}"))?;
@@ -306,4 +343,38 @@ fn load_wifi_creds(nvs: &EspDefaultNvsPartition) -> Option<(String, String)> {
         .unwrap_or("")
         .to_string();
     Some((ssid, password))
+}
+
+/// Load LoRa radio settings saved via Settings → LoRa from NVS, if present.
+fn load_lora_settings(nvs: &EspDefaultNvsPartition) -> Option<LoraSettings> {
+    let mut nvs = EspNvs::new(nvs.clone(), "reticula", true).ok()?;
+
+    let mut buf = [0u8; 32];
+    let enabled = nvs.get_str("lora_enabled", &mut buf).ok().flatten()?;
+    let enabled = enabled.trim() == "1";
+
+    let mut buf = [0u8; 32];
+    let frequency_hz = nvs.get_str("lora_freq", &mut buf).ok().flatten()?.trim().parse().ok()?;
+    let mut buf = [0u8; 32];
+    let bandwidth_hz = nvs.get_str("lora_bw", &mut buf).ok().flatten()?.trim().parse().ok()?;
+    let mut buf = [0u8; 32];
+    let spreading_factor = nvs.get_str("lora_sf", &mut buf).ok().flatten()?.trim().parse().ok()?;
+    let mut buf = [0u8; 32];
+    let coding_rate = nvs.get_str("lora_cr", &mut buf).ok().flatten()?.trim().parse().ok()?;
+    let mut buf = [0u8; 32];
+    let tx_power_dbm = nvs.get_str("lora_txp", &mut buf).ok().flatten()?.trim().parse().ok()?;
+
+    let settings = LoraSettings {
+        enabled,
+        frequency_hz,
+        bandwidth_hz,
+        spreading_factor,
+        coding_rate,
+        tx_power_dbm,
+    };
+    log::info!(
+        "LoRa settings loaded from NVS (enabled={})",
+        settings.enabled
+    );
+    Some(settings)
 }

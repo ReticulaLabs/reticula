@@ -8,6 +8,7 @@ pub mod nomad_list;
 pub mod nomad_view;
 pub mod settings;
 pub mod settings_identity;
+pub mod settings_lora;
 pub mod settings_wifi;
 
 use embedded_graphics::draw_target::DrawTarget;
@@ -27,6 +28,7 @@ use nomad_list::NomadListScreen;
 use nomad_view::NomadViewScreen;
 use settings::SettingsScreen;
 use settings_identity::SettingsIdentityScreen;
+use settings_lora::SettingsLoraScreen;
 use settings_wifi::SettingsWifiScreen;
 
 /// The active screen. Rendered through the generic display draw target and
@@ -41,6 +43,7 @@ pub enum Screen {
     Settings(SettingsScreen),
     SettingsIdentity(SettingsIdentityScreen),
     SettingsWifi(SettingsWifiScreen),
+    SettingsLora(SettingsLoraScreen),
 }
 
 impl Screen {
@@ -55,6 +58,7 @@ impl Screen {
             Screen::Settings(_) => ScreenId::Settings,
             Screen::SettingsIdentity(_) => ScreenId::SettingsIdentity,
             Screen::SettingsWifi(_) => ScreenId::SettingsWifi,
+            Screen::SettingsLora(_) => ScreenId::SettingsLora,
         }
     }
 
@@ -69,6 +73,7 @@ impl Screen {
             Screen::Settings(s) => s.handle_key(key),
             Screen::SettingsIdentity(s) => s.handle_key(key),
             Screen::SettingsWifi(s) => s.handle_key(key),
+            Screen::SettingsLora(s) => s.handle_key(key),
         }
     }
 
@@ -87,6 +92,7 @@ impl Screen {
             Screen::Settings(s) => s.render(target, ctx, theme),
             Screen::SettingsIdentity(s) => s.render(target, ctx, theme),
             Screen::SettingsWifi(s) => s.render(target, ctx, theme),
+            Screen::SettingsLora(s) => s.render(target, ctx, theme),
         }
     }
 
@@ -98,6 +104,7 @@ impl Screen {
                 | Screen::NewChat(_)
                 | Screen::SettingsIdentity(_)
                 | Screen::SettingsWifi(_)
+                | Screen::SettingsLora(_)
         )
     }
 }

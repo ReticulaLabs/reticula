@@ -19,5 +19,6 @@ pub mod app;
 pub mod config;
 pub mod identity;
 
-pub use app::{AppError, PersistIdentity, PersistWifi, ReticulaApp};
+pub use app::{AppError, PersistIdentity, PersistLora, PersistWifi, ReticulaApp};
 pub use config::{NetConfig, TransportKind};
+pub use reticula_ui::LoraSettings;

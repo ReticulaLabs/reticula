@@ -18,10 +18,11 @@ embuild = { version = "0.31", features = ["espidf"] }
 [dependencies]
 reticula-app = { path = "../crates/reticula-app", features = ["lora", "embedded"] }
 reticula-tdeck = { path = "../crates/reticula-tdeck" }
-# v2.3.2 gained upstream embedded support; disabling default features keeps
+# v2.3.3 gained upstream embedded support; disabling default features keeps
 # the Linux-only tokio-serial/gpio-cdev deps out of the ESP-IDF build. The
 # `embedded` feature uses short packet/destination/path retention so the
-# transport state stays bounded in the T-Deck's limited RAM.
+# transport state stays bounded in the T-Deck's limited RAM, and LoRa chipset
+# work runs on the tokio worker (no blocking-pool threads).
 reticulum-sdk = { version = "2.3", default-features = false, features = ["alloc", "lora", "embedded"] }
 # No `signal`/`process`/`full`: signal-hook-registry does not build on ESP-IDF.
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }

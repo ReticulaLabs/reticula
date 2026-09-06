@@ -19,7 +19,7 @@ pub struct SettingsScreen {
 }
 
 impl SettingsScreen {
-    const ITEMS: [&'static str; 3] = ["Identity", "WiFi", "Re-announce identities"];
+    const ITEMS: [&'static str; 4] = ["Identity", "WiFi", "LoRa", "Re-announce identities"];
 
     pub fn new() -> Self {
         Self { state: ListState::default() }
@@ -38,6 +38,7 @@ impl SettingsScreen {
             KeyCode::Enter => match self.state.selected {
                 0 => Command::ShowScreen(ScreenId::SettingsIdentity),
                 1 => Command::ShowScreen(ScreenId::SettingsWifi),
+                2 => Command::ShowScreen(ScreenId::SettingsLora),
                 _ => Command::Announce,
             },
             KeyCode::Esc => Command::Back,

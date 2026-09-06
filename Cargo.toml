@@ -30,13 +30,8 @@ repository = "https://github.com/kallisti5/reticula"
 rust-version = "1.85"
 
 [workspace.dependencies]
-# v2.3.2 gained the embedded support upstream: the `serial`/`lora` interfaces
-# are feature-gated, 64-bit counters use portable-atomic, tokio uses a slimmed
-# feature set, and the `embedded` feature bounds packet/destination/path
-# retention for resource-constrained targets. Default features (which include
-# the Linux LoRa backend) are disabled here; `lora` is enabled on-demand via
-# reticula-app's `lora` feature and `embedded` via its `embedded` feature.
-reticulum-sdk = { version = "2.3", default-features = false, features = ["alloc"] }
+# Reticulum-sdk has an "embedded" feature for low-resource devices
+reticulum-sdk = { version = "2.3", default-features = false, features = ["alloc", "embedded"] }
 embedded-graphics = "0.8"
 
 # Targeted tokio features: `signal`/`process` pull in signal-hook-registry,

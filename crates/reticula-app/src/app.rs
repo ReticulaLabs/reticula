@@ -36,8 +36,9 @@ use reticula_ui::screens::nomad_list::NomadListScreen;
 use reticula_ui::screens::nomad_view::NomadViewScreen;
 use reticula_ui::screens::settings::SettingsScreen;
 use reticula_ui::screens::settings_identity::SettingsIdentityScreen;
+use reticula_ui::screens::settings_lora::SettingsLoraScreen;
 use reticula_ui::screens::settings_wifi::SettingsWifiScreen;
-use reticula_ui::{Command, Screen, ScreenId, Theme};
+use reticula_ui::{Command, LoraSettings, Screen, ScreenId, Theme};
 
 use crate::config::NetConfig;
 
@@ -54,6 +55,8 @@ pub const MAX_MESSAGES: usize = 512;
 pub type PersistIdentity = Box<dyn Fn(&PrivateIdentity) + Send + 'static>;
 /// Persists new WiFi credentials (NVS on device). No-op on the simulator.
 pub type PersistWifi = Box<dyn Fn(&str, &str) + Send + 'static>;
+/// Persists new LoRa radio settings (NVS on device). No-op on the simulator.
+pub type PersistLora = Box<dyn Fn(&LoraSettings) + Send + 'static>;
 
 /// Errors produced by the application.
 #[derive(Debug)]
@@ -116,8 +119,12 @@ pub struct ReticulaApp<B: Board> {
     persist_identity: Option<PersistIdentity>,
     /// Persist new WiFi credentials before restarting.
     persist_wifi: Option<PersistWifi>,
+    /// Persist new LoRa radio settings before restarting.
+    persist_lora: Option<PersistLora>,
     /// The currently configured WiFi SSID (for display in the WiFi sub-menu).
     wifi_ssid: String,
+    /// The currently configured LoRa radio settings.
+    lora_settings: LoraSettings,
     /// Transient notice shown on the settings screens (e.g. "restarting…").
     notice: String,
     /// Set when the app must restart (identity regenerated / WiFi changed).
@@ -141,6 +148,7 @@ impl<B: Board> ReticulaApp<B> {
         net: NetConfig,
         persist_identity: Option<PersistIdentity>,
         persist_wifi: Option<PersistWifi>,
+        persist_lora: Option<PersistLora>,
     ) -> Result<Self, AppError> {
         let (transport, delivery) = build_transport(&identity, &net).await?;
 
@@ -158,6 +166,24 @@ impl<B: Board> ReticulaApp<B> {
         // the raw identity key hex.
         let identity_hex = lxmf.delivery_address().to_hex_string();
         let wifi_ssid = board.wifi_ssid().unwrap_or_default();
+        let lora_settings = {
+            #[cfg(feature = "lora")]
+            {
+                net.lora.as_ref().map(|c| LoraSettings {
+                    enabled: true,
+                    frequency_hz: c.frequency,
+                    bandwidth_hz: c.bandwidth as u64,
+                    spreading_factor: c.spreading_factor,
+                    coding_rate: c.coding_rate,
+                    tx_power_dbm: c.tx_power,
+                })
+                .unwrap_or_default()
+            }
+            #[cfg(not(feature = "lora"))]
+            {
+                LoraSettings::default()
+            }
+        };
 
         Ok(Self {
             board,
@@ -176,7 +202,9 @@ impl<B: Board> ReticulaApp<B> {
             quit: false,
             persist_identity,
             persist_wifi,
+            persist_lora,
             wifi_ssid,
+            lora_settings,
             notice: String::new(),
             restart_requested: false,
             lora_online: {
@@ -409,6 +437,14 @@ impl<B: Board> ReticulaApp<B> {
                 self.notice = "WiFi saved. Restarting…".to_string();
                 self.restart_requested = true;
             }
+            Command::SaveLora(settings) => {
+                if let Some(persist) = &self.persist_lora {
+                    persist(&settings);
+                }
+                self.lora_settings = settings;
+                self.notice = "LoRa settings saved. Restarting…".to_string();
+                self.restart_requested = true;
+            }
         }
     }
 
@@ -425,6 +461,7 @@ impl<B: Board> ReticulaApp<B> {
             ScreenId::Settings => Screen::Settings(SettingsScreen::new()),
             ScreenId::SettingsIdentity => Screen::SettingsIdentity(SettingsIdentityScreen::new()),
             ScreenId::SettingsWifi => Screen::SettingsWifi(SettingsWifiScreen::new()),
+            ScreenId::SettingsLora => Screen::SettingsLora(SettingsLoraScreen::new()),
             ScreenId::Chat | ScreenId::NomadView => return, // opened with context
         };
         self.push(screen);
@@ -606,6 +643,7 @@ LxmfEvent::ContactDiscovered { address, name } => {
             identity_hex,
             display_name,
             wifi_ssid,
+            lora_settings,
             notice,
             ..
         } = self;
@@ -628,6 +666,7 @@ LxmfEvent::ContactDiscovered { address, name } => {
             display_name: display_name.as_str(),
             notice: notice.as_str(),
             wifi_ssid: wifi_ssid.as_str(),
+            lora_settings: Some(lora_settings),
             network: NetworkState {
                 connected: shared.connected.load(Ordering::Relaxed),
                 uptime_ms: board.uptime_ms(),

@@ -14,6 +14,42 @@ pub enum ScreenId {
     SettingsIdentity,
     /// Sub-menu: WiFi network SSID / password.
     SettingsWifi,
+    /// Sub-menu: LoRa radio configuration.
+    SettingsLora,
+}
+
+/// LoRa radio configuration, as shown in the Settings → LoRa sub-menu.
+///
+/// Frequencies/bandwidths are held in Hz (matching the SDK's `LoRaConfig`);
+/// the UI displays frequency in kHz (e.g. 914875 = 914.875 MHz, so fractional
+/// MHz needs no decimal input) and bandwidth in kHz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoraSettings {
+    /// Whether the LoRa interface is enabled.
+    pub enabled: bool,
+    /// Carrier frequency in Hz (displayed in MHz).
+    pub frequency_hz: u64,
+    /// Bandwidth in Hz (displayed in kHz).
+    pub bandwidth_hz: u64,
+    /// Spreading factor (7–12).
+    pub spreading_factor: u8,
+    /// Coding rate denominator (5–8, i.e. 4/5..4/8).
+    pub coding_rate: u8,
+    /// TX power in dBm.
+    pub tx_power_dbm: i8,
+}
+
+impl Default for LoraSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            frequency_hz: 868_000_000,
+            bandwidth_hz: 125_000,
+            spreading_factor: 7,
+            coding_rate: 5,
+            tx_power_dbm: 14,
+        }
+    }
 }
 
 /// An action the UI asks the application to perform.
@@ -40,6 +76,8 @@ pub enum Command {
     RegenerateIdentity,
     /// Persist new WiFi credentials and restart so the device reconnects.
     SaveWifi { ssid: String, password: String },
+    /// Persist new LoRa radio settings and restart so they take effect.
+    SaveLora(LoraSettings),
     /// Navigate back in the screen stack.
     Back,
     /// Quit the application (host simulator).

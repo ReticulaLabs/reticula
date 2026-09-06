@@ -89,7 +89,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut app =
-        ReticulaApp::new(board, identity, display_name, net, persist_identity, None).await?;
+        ReticulaApp::new(board, identity, display_name, net, persist_identity, None, None).await?;
     app.run().await?;
     Ok(())
 }
