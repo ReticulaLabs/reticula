@@ -189,8 +189,8 @@ let lora = match lora_settings {
             .lora_hw()
             .ok_or("board has no LoRa hardware")?;
         log::info!(
-            "LoRa enabled: {} MHz, {} kHz, SF{}, CR4/{}, {} dBm",
-            settings.frequency_hz / 1_000_000,
+            "LoRa enabled: {} kHz, {} kHz, SF{}, CR4/{}, {} dBm",
+            settings.frequency_hz / 1000,
             settings.bandwidth_hz / 1000,
             settings.spreading_factor,
             settings.coding_rate,
