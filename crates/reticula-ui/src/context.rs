@@ -2,7 +2,7 @@
 
 use reticula_nomad::page::Page;
 
-use crate::command::LoraSettings;
+use crate::command::{LoraSettings, PeerProtocol};
 
 /// A conversation in the chat list.
 #[derive(Debug, Clone, Default)]
@@ -55,6 +55,8 @@ pub struct NetworkState {
     pub peer_links: u32,
     /// Whether the WiFi link is up.
     pub wifi_connected: bool,
+    /// Whether the WiFi interface is enabled (independent of link state).
+    pub wifi_enabled: bool,
     /// WiFi RSSI in dBm, when the board has WiFi.
     pub wifi_rssi: Option<i8>,
     /// Whether the LoRa radio interface is online. `None` when not configured.
@@ -82,9 +84,13 @@ pub struct ViewContext<'a> {
     pub display_name: &'a str,
     /// A transient notice (e.g. "restarting…") shown on the settings screens.
     pub notice: &'a str,
-    /// The WiFi network SSID currently configured, if any.
+/// The WiFi network SSID currently configured, if any.
     pub wifi_ssid: &'a str,
-    /// The currently configured LoRa radio settings, if any.
+    /// The currently configured LoRa radio settings.
     pub lora_settings: Option<&'a LoraSettings>,
+    /// Remote Reticulum peer (`host:port`) currently configured, if any.
+    pub peer_addr: &'a str,
+    /// Protocol used to reach the remote peer.
+    pub peer_proto: PeerProtocol,
     pub network: NetworkState,
 }

@@ -21,4 +21,4 @@ pub mod identity;
 
 pub use app::{AppError, PersistIdentity, PersistLora, PersistWifi, ReticulaApp};
 pub use config::{NetConfig, TransportKind};
-pub use reticula_ui::LoraSettings;
+pub use reticula_ui::{LoraSettings, PeerProtocol, WifiSettings};

@@ -52,6 +52,29 @@ impl Default for LoraSettings {
     }
 }
 
+/// Transport protocol used to reach the remote Reticulum peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PeerProtocol {
+    /// Reticulum TCP client interface.
+    #[default]
+    Tcp,
+    /// Reticulum UDP client interface (peer/forward).
+    Udp,
+}
+
+/// WiFi + remote Reticulum peer configuration shown in Settings → WiFi.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WifiSettings {
+    /// Whether the WiFi interface is enabled.
+    pub enabled: bool,
+    pub ssid: String,
+    pub password: String,
+    /// Remote Reticulum peer as `host:port` (empty = none configured).
+    pub peer_addr: String,
+    /// Protocol used to reach the remote peer.
+    pub peer_proto: PeerProtocol,
+}
+
 /// An action the UI asks the application to perform.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
@@ -74,8 +97,9 @@ pub enum Command {
     /// Generate a brand-new Reticulum identity, persist it, and restart so the
     /// new LXMF address becomes active.
     RegenerateIdentity,
-    /// Persist new WiFi credentials and restart so the device reconnects.
-    SaveWifi { ssid: String, password: String },
+    /// Persist new WiFi + remote peer settings and restart so they take
+    /// effect.
+    SaveWifi(WifiSettings),
     /// Persist new LoRa radio settings and restart so they take effect.
     SaveLora(LoraSettings),
     /// Navigate back in the screen stack.

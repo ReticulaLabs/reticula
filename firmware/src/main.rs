@@ -28,7 +28,7 @@ use getrandom::SysRng;
 use rand_core::UnwrapErr;
 use reticulum_sdk::identity::PrivateIdentity;
 
-use reticula_app::{LoraSettings, NetConfig, PersistIdentity, PersistLora, PersistWifi, ReticulaApp, TransportKind};
+use reticula_app::{LoraSettings, NetConfig, PersistIdentity, PersistLora, PersistWifi, PeerProtocol, ReticulaApp, TransportKind, WifiSettings};
 use reticula_tdeck::TDeckBoard;
 
 const WIFI_SSID: Option<&str> = option_env!("WIFI_SSID");
@@ -102,17 +102,25 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         ..
     } = Peripherals::take().map_err(|e| format!("Peripherals::take: {e}"))?;
 
-    // WiFi (best-effort; the device still runs offline). The handle is attached
-    // to the board so the UI can report link status and RSSI.
-    let wifi = match connect_wifi(modem, nvs.clone()) {
-        Ok(wifi) => {
-            log::info!("WiFi connected");
-            Some(wifi)
+    // WiFi (best-effort; the device still runs offline unless disabled). The
+    // handle is attached to the board so the UI can report link status/RSSI.
+    // The enabled flag is persisted via Settings → WiFi; default is on so
+    // devices that predate the toggle keep connecting.
+    let wifi_enabled = load_wifi_enabled(&nvs);
+    let wifi = if wifi_enabled {
+        match connect_wifi(modem, nvs.clone()) {
+            Ok(wifi) => {
+                log::info!("WiFi connected");
+                Some(wifi)
+            }
+            Err(e) => {
+                log::warn!("WiFi not connected: {e}");
+                None
+            }
         }
-        Err(e) => {
-            log::warn!("WiFi not connected: {e}");
-            None
-        }
+    } else {
+        log::info!("WiFi disabled (settings)");
+        None
     };
 
     let mut board = TDeckBoard::new(spi2, i2c0, pins)
@@ -141,14 +149,21 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let persist_wifi: Option<PersistWifi> = {
         let nvs = nvs.clone();
-        Some(Box::new(move |ssid: &str, password: &str| {
+        Some(Box::new(move |settings: &WifiSettings| {
+            let proto = match settings.peer_proto {
+                PeerProtocol::Tcp => "tcp",
+                PeerProtocol::Udp => "udp",
+            };
             let result = EspNvs::new(nvs.clone(), "reticula", true).and_then(|mut nvs| {
-                nvs.set_str("wifi_ssid", ssid)?;
-                nvs.set_str("wifi_pass", password)
+                nvs.set_str("wifi_enabled", if settings.enabled { "1" } else { "0" })?;
+                nvs.set_str("wifi_ssid", &settings.ssid)?;
+                nvs.set_str("wifi_pass", &settings.password)?;
+                nvs.set_str("peer_addr", &settings.peer_addr)?;
+                nvs.set_str("peer_proto", proto)
             });
             match result {
-                Ok(()) => log::info!("WiFi credentials saved to NVS"),
-                Err(e) => log::warn!("could not save WiFi credentials to NVS: {e}"),
+                Ok(()) => log::info!("Network settings saved to NVS"),
+                Err(e) => log::warn!("could not save network settings to NVS: {e}"),
             }
         }))
     };
@@ -215,22 +230,42 @@ let lora = match lora_settings {
     _ => None,
 };
 
-    let net = NetConfig {
-        transport: match RNS_PEER {
-            // Default to an outbound TCP connection to a reachable Reticulum
-            // node (`host:port`).
-            Some(peer) => TransportKind::TcpPeer {
-                addr: peer.to_string(),
-            },
-            // No peer configured: listen on UDP so the device can still be
-            // reached on the local network.
-            None => TransportKind::Udp {
+    // Remote Reticulum peer, configured via Settings → WiFi (persisted to
+    // NVS) or at build time via `RNS_PEER`. Falls back to a UDP listener so
+    // the device can still be reached on the local network.
+    let peer = load_peer_config(&nvs).or_else(|| {
+        RNS_PEER.map(|addr| {
+            let addr = addr.to_string();
+            (addr, PeerProtocol::Tcp)
+        })
+    });
+
+    let transport = match peer {
+        Some((addr, PeerProtocol::Tcp)) => {
+            log::info!("reticulum: TCP peer {addr}");
+            TransportKind::TcpPeer { addr }
+        }
+        Some((addr, PeerProtocol::Udp)) => {
+            log::info!("reticulum: UDP peer {addr}");
+            TransportKind::Udp {
+                bind: "0.0.0.0:5238".to_string(),
+                forward: Some(addr),
+            }
+        }
+        None => {
+            log::info!("reticulum: no remote peer, listening on UDP");
+            TransportKind::Udp {
                 bind: "0.0.0.0:5238".to_string(),
                 forward: None,
-            },
-        },
+            }
+        }
+    };
+
+    let net = NetConfig {
+        transport,
         quit_on_root_back: false,
         announce_interval: Duration::from_secs(300),
+        wifi_enabled,
         lora,
     };
 
@@ -287,6 +322,43 @@ fn load_or_create_identity(nvs: &EspDefaultNvsPartition) -> PrivateIdentity {
         Err(e) => log::warn!("could not save identity to NVS: {e}"),
     }
     identity
+}
+
+/// Load the WiFi-enabled flag saved via Settings → WiFi from NVS. Defaults to
+/// true so devices that predate the toggle keep connecting.
+fn load_wifi_enabled(nvs: &EspDefaultNvsPartition) -> bool {
+    let Ok(mut nvs) = EspNvs::new(nvs.clone(), "reticula", true) else {
+        return true;
+    };
+    let mut buf = [0u8; 16];
+    match nvs.get_str("wifi_enabled", &mut buf).ok().flatten() {
+        Some(v) => v.trim() == "1",
+        None => true,
+    }
+}
+
+/// Load the remote Reticulum peer configured via Settings → WiFi from NVS.
+/// Returns `None` when no endpoint has been saved.
+fn load_peer_config(nvs: &EspDefaultNvsPartition) -> Option<(String, PeerProtocol)> {
+    let mut nvs = EspNvs::new(nvs.clone(), "reticula", true).ok()?;
+
+    let mut addr_buf = [0u8; 128];
+    let addr = nvs
+        .get_str("peer_addr", &mut addr_buf)
+        .ok()
+        .flatten()?
+        .trim()
+        .to_string();
+    if addr.is_empty() {
+        return None;
+    }
+
+    let mut proto_buf = [0u8; 8];
+    let proto = match nvs.get_str("peer_proto", &mut proto_buf).ok().flatten() {
+        Some(v) if v.trim() == "udp" => PeerProtocol::Udp,
+        _ => PeerProtocol::Tcp,
+    };
+    Some((addr, proto))
 }
 
 /// Connect to WiFi as a station.

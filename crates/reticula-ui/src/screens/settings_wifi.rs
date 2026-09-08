@@ -1,4 +1,4 @@
-//! Settings sub-menu: WiFi network — SSID and password.
+//! Settings sub-menu: WiFi network — enable/disable, SSID and password.
 
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::geometry::Point;
@@ -7,7 +7,7 @@ use embedded_graphics::primitives::Rectangle;
 
 use reticula_hal::KeyCode;
 
-use crate::command::Command;
+use crate::command::{Command, PeerProtocol, WifiSettings};
 use crate::context::ViewContext;
 use crate::screens::ListState;
 use crate::theme::Theme;
@@ -17,24 +17,25 @@ use crate::widgets::{self, px};
 enum Field {
     Ssid,
     Password,
+    Peer,
 }
 
 #[derive(Default)]
 pub struct SettingsWifiScreen {
     pub state: ListState,
+    enabled: bool,
     editing: Option<Field>,
     ssid_input: String,
     pass_input: String,
+    peer_input: String,
+    peer_proto: PeerProtocol,
+    /// Whether the enabled/peer values have been seeded from the current config.
+    seeded: bool,
 }
 
 impl SettingsWifiScreen {
     pub fn new() -> Self {
-        Self {
-            state: ListState::default(),
-            editing: None,
-            ssid_input: String::new(),
-            pass_input: String::new(),
-        }
+        Self::default()
     }
 
     pub fn handle_key(&mut self, key: KeyCode) -> Command {
@@ -42,6 +43,7 @@ impl SettingsWifiScreen {
             let input = match field {
                 Field::Ssid => &mut self.ssid_input,
                 Field::Password => &mut self.pass_input,
+                Field::Peer => &mut self.peer_input,
             };
             return match key {
                 KeyCode::Char(c) if c.is_ascii() => {
@@ -74,28 +76,40 @@ impl SettingsWifiScreen {
                 Command::None
             }
             KeyCode::Down => {
-                self.state.move_down(3);
+                self.state.move_down(6);
                 Command::None
             }
             KeyCode::Enter => match self.state.selected {
                 0 => {
-                    self.editing = Some(Field::Ssid);
+                    self.enabled = !self.enabled;
                     Command::None
                 }
                 1 => {
+                    self.editing = Some(Field::Ssid);
+                    Command::None
+                }
+                2 => {
                     self.editing = Some(Field::Password);
                     Command::None
                 }
-                _ => {
-                    if self.ssid_input.trim().is_empty() {
-                        Command::None
-                    } else {
-                        Command::SaveWifi {
-                            ssid: self.ssid_input.trim().to_string(),
-                            password: self.pass_input.clone(),
-                        }
-                    }
+                3 => {
+                    self.editing = Some(Field::Peer);
+                    Command::None
                 }
+                4 => {
+                    self.peer_proto = match self.peer_proto {
+                        PeerProtocol::Tcp => PeerProtocol::Udp,
+                        PeerProtocol::Udp => PeerProtocol::Tcp,
+                    };
+                    Command::None
+                }
+                _ => Command::SaveWifi(WifiSettings {
+                    enabled: self.enabled,
+                    ssid: self.ssid_input.trim().to_string(),
+                    password: self.pass_input.clone(),
+                    peer_addr: self.peer_input.trim().to_string(),
+                    peer_proto: self.peer_proto,
+                }),
             },
             KeyCode::Esc => Command::Back,
             _ => Command::None,
@@ -110,12 +124,21 @@ impl SettingsWifiScreen {
         let width = size.width as i32;
         let height = size.height as i32;
 
+        if !self.seeded {
+            self.seeded = true;
+            self.enabled = ctx.network.wifi_enabled;
+            self.peer_input = ctx.peer_addr.to_string();
+            self.peer_proto = ctx.peer_proto;
+        }
+
         widgets::draw_header(target, width, "WiFi", "", &ctx.network, theme).ok();
 
         let mut y = theme.line_h;
 
         // Current configuration / status.
-        let status = if !ctx.wifi_ssid.is_empty() {
+        let status = if !self.enabled {
+            "Network: disabled".to_string()
+        } else if !ctx.wifi_ssid.is_empty() {
             format!("Network: {}", ctx.wifi_ssid)
         } else {
             "Network: not configured".to_string()
@@ -130,15 +153,59 @@ impl SettingsWifiScreen {
         widgets::draw_text(target, Point::new(0, y), link, theme.text_dim, theme).ok();
         y += theme.line_h + 4;
 
-        // Row 0: SSID.
-        y = self.draw_field(target, width, y, ctx, theme, 0, "SSID", &self.ssid_input, Field::Ssid);
-        // Row 1: password.
-        y = self.draw_field(target, width, y, ctx, theme, 1, "Password", &self.pass_input, Field::Password);
-
-        // Row 2: save & reconnect.
+        // Row 0: enabled toggle.
+        let line = format!("Enabled: {}", if self.enabled { "on" } else { "off" });
         let at = Point::new(0, y);
-        let label = "Save & reconnect";
-        if self.state.selected == 2 {
+        if self.state.selected == 0 {
+            widgets::draw_highlight(
+                target,
+                at,
+                &line,
+                width,
+                theme.selection,
+                theme.selection_text,
+                theme,
+            )
+            .ok();
+        } else {
+            widgets::draw_text(target, at, &line, theme.text, theme).ok();
+        }
+        y += theme.line_h;
+
+        // Row 1: SSID.
+        y = self.draw_field(target, width, y, ctx, theme, 1, "SSID", &self.ssid_input, Field::Ssid);
+        // Row 2: password.
+        y = self.draw_field(target, width, y, ctx, theme, 2, "Password", &self.pass_input, Field::Password);
+        // Row 3: remote peer endpoint.
+        y = self.draw_field(target, width, y, ctx, theme, 3, "Remote endpoint", &self.peer_input, Field::Peer);
+
+        // Row 4: remote protocol (TCP/UDP).
+        let proto = match self.peer_proto {
+            PeerProtocol::Tcp => "TCP",
+            PeerProtocol::Udp => "UDP",
+        };
+        let line = format!("Remote protocol: {proto}");
+        let at = Point::new(0, y);
+        if self.state.selected == 4 {
+            widgets::draw_highlight(
+                target,
+                at,
+                &line,
+                width,
+                theme.selection,
+                theme.selection_text,
+                theme,
+            )
+            .ok();
+        } else {
+            widgets::draw_text(target, at, &line, theme.text, theme).ok();
+        }
+        y += theme.line_h;
+
+        // Row 5: save & restart.
+        let at = Point::new(0, y);
+        let label = "Save & restart";
+        if self.state.selected == 5 {
             widgets::draw_highlight(
                 target,
                 at,

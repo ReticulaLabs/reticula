@@ -38,7 +38,7 @@ use reticula_ui::screens::settings::SettingsScreen;
 use reticula_ui::screens::settings_identity::SettingsIdentityScreen;
 use reticula_ui::screens::settings_lora::SettingsLoraScreen;
 use reticula_ui::screens::settings_wifi::SettingsWifiScreen;
-use reticula_ui::{Command, LoraSettings, Screen, ScreenId, Theme};
+use reticula_ui::{Command, LoraSettings, PeerProtocol, Screen, ScreenId, Theme, WifiSettings};
 
 use crate::config::NetConfig;
 
@@ -53,8 +53,9 @@ pub const MAX_MESSAGES: usize = 512;
 /// Persists a freshly generated identity (NVS on device, file on the sim).
 /// Called before the app requests a restart so the new identity survives it.
 pub type PersistIdentity = Box<dyn Fn(&PrivateIdentity) + Send + 'static>;
-/// Persists new WiFi credentials (NVS on device). No-op on the simulator.
-pub type PersistWifi = Box<dyn Fn(&str, &str) + Send + 'static>;
+/// Persists new WiFi + remote peer settings (NVS on device). No-op on the
+/// simulator.
+pub type PersistWifi = Box<dyn Fn(&WifiSettings) + Send + 'static>;
 /// Persists new LoRa radio settings (NVS on device). No-op on the simulator.
 pub type PersistLora = Box<dyn Fn(&LoraSettings) + Send + 'static>;
 
@@ -123,6 +124,12 @@ pub struct ReticulaApp<B: Board> {
     persist_lora: Option<PersistLora>,
     /// The currently configured WiFi SSID (for display in the WiFi sub-menu).
     wifi_ssid: String,
+    /// Whether the WiFi interface is enabled (persisted via NVS).
+    wifi_enabled: bool,
+    /// Remote Reticulum peer (`host:port`) from the current transport config.
+    peer_addr: String,
+    /// Transport protocol used to reach the remote peer.
+    peer_proto: PeerProtocol,
     /// The currently configured LoRa radio settings.
     lora_settings: LoraSettings,
     /// Transient notice shown on the settings screens (e.g. "restarting…").
@@ -166,6 +173,16 @@ impl<B: Board> ReticulaApp<B> {
         // the raw identity key hex.
         let identity_hex = lxmf.delivery_address().to_hex_string();
         let wifi_ssid = board.wifi_ssid().unwrap_or_default();
+        let wifi_enabled = net.wifi_enabled;
+        // Current remote peer from the transport config, for the WiFi settings
+        // page to show/seed.
+        let (peer_addr, peer_proto) = match &net.transport {
+            crate::TransportKind::TcpPeer { addr } => (addr.clone(), PeerProtocol::Tcp),
+            crate::TransportKind::Udp { forward: Some(addr), .. } => {
+                (addr.clone(), PeerProtocol::Udp)
+            }
+            _ => (String::new(), PeerProtocol::Tcp),
+        };
         let lora_settings = {
             #[cfg(feature = "lora")]
             {
@@ -204,6 +221,9 @@ impl<B: Board> ReticulaApp<B> {
             persist_wifi,
             persist_lora,
             wifi_ssid,
+            wifi_enabled,
+            peer_addr,
+            peer_proto,
             lora_settings,
             notice: String::new(),
             restart_requested: false,
@@ -429,12 +449,15 @@ impl<B: Board> ReticulaApp<B> {
                 self.notice = "New identity saved. Restarting…".to_string();
                 self.restart_requested = true;
             }
-            Command::SaveWifi { ssid, password } => {
+            Command::SaveWifi(settings) => {
                 if let Some(persist) = &self.persist_wifi {
-                    persist(&ssid, &password);
+                    persist(&settings);
                 }
-                self.wifi_ssid = ssid;
-                self.notice = "WiFi saved. Restarting…".to_string();
+                self.wifi_ssid = settings.ssid;
+                self.wifi_enabled = settings.enabled;
+                self.peer_addr = settings.peer_addr;
+                self.peer_proto = settings.peer_proto;
+                self.notice = "Network settings saved. Restarting…".to_string();
                 self.restart_requested = true;
             }
             Command::SaveLora(settings) => {
@@ -643,6 +666,9 @@ LxmfEvent::ContactDiscovered { address, name } => {
             identity_hex,
             display_name,
             wifi_ssid,
+            wifi_enabled,
+            peer_addr,
+            peer_proto,
             lora_settings,
             notice,
             ..
@@ -667,11 +693,14 @@ LxmfEvent::ContactDiscovered { address, name } => {
             notice: notice.as_str(),
             wifi_ssid: wifi_ssid.as_str(),
             lora_settings: Some(lora_settings),
+            peer_addr: peer_addr.as_str(),
+            peer_proto: *peer_proto,
             network: NetworkState {
                 connected: shared.connected.load(Ordering::Relaxed),
                 uptime_ms: board.uptime_ms(),
                 peer_links: shared.peer_links.load(Ordering::Relaxed),
                 wifi_connected: board.wifi_status().map(|w| w.0).unwrap_or(false),
+                wifi_enabled: *wifi_enabled,
                 wifi_rssi: board.wifi_status().map(|w| w.1),
                 lora_online: self.lora_online,
             },

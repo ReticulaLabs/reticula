@@ -36,6 +36,9 @@ pub struct NetConfig {
     /// Whether pressing back on the home screen exits the application.
     /// True on the desktop simulator, false on a device.
     pub quit_on_root_back: bool,
+    /// Whether the WiFi interface should be enabled at boot (firmware reads
+    /// this from NVS; defaults to true so existing devices keep connecting).
+    pub wifi_enabled: bool,
     /// Optional LoRa radio interface (e.g. an SX1262 on the T-Deck), enabled
     /// with the `lora` feature. The config carries an embedded-hal hardware
     /// provider (`LoRaConfig::with_embedded_hw`); when set, a LoRa interface
@@ -50,6 +53,7 @@ impl Default for NetConfig {
             transport: TransportKind::None,
             announce_interval: Duration::from_secs(300),
             quit_on_root_back: false,
+            wifi_enabled: true,
             #[cfg(feature = "lora")]
             lora: None,
         }
