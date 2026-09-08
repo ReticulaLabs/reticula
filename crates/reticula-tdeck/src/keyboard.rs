@@ -104,6 +104,15 @@ impl Keyboard for TdeckKeyboard<'_> {
         let alt_down = bit(&matrix, 0, 4);
         let shift_down = bit(&matrix, 1, 6) || bit(&matrix, 2, 3);
 
+        // Raw matrix trace: log whenever the matrix changes so key positions
+        // can be correlated with the physical keycaps on a serial console.
+        if matrix != self.prev {
+            debug!(
+                "kbd: raw matrix = [{:02x}, {:02x}, {:02x}, {:02x}, {:02x}] sym={sym_down} alt={alt_down} shift={shift_down}",
+                matrix[0], matrix[1], matrix[2], matrix[3], matrix[4],
+            );
+        }
+
         let mut n = 0;
         let mut emit = |code: KeyCode, state: KeyState| {
             if n < events.len() {
@@ -128,9 +137,14 @@ impl Keyboard for TdeckKeyboard<'_> {
         for row in 0..7 {
             for col in 0..MATRIX_COLS {
                 if bit(&matrix, col, row) && !bit(&self.prev, col, row) {
-                    if let Some(code) = key_for(col, row, sym_down, shift_down) {
-                        debug!("kbd: matrix ({col},{row}) -> {code:?}");
-                        emit(code, KeyState::Pressed);
+                    match key_for(col, row, sym_down, shift_down) {
+                        Some(code) => {
+                            debug!("kbd: press ({col},{row}) -> {code:?}");
+                            emit(code, KeyState::Pressed);
+                        }
+                        None => {
+                            debug!("kbd: press ({col},{row}) -> ignored (non-output)");
+                        }
                     }
                 }
             }
@@ -155,7 +169,13 @@ fn key_for(col: usize, row: usize, sym_down: bool, shift_down: bool) -> Option<K
         (4, 3) => return Some(KeyCode::Backspace),
         (0, 5) => return Some(KeyCode::Space),
         // Non-output keys: Alt, Symbol, Mic, Left/Right Shift.
-        (0, 4) | (0, 2) | (0, 6) | (1, 6) | (2, 3) => return None,
+        //
+        // `(0, 6)` is deliberately NOT in this list: the same physical key is
+        // the Mic button on the base layer AND the digit `0` on the symbol
+        // layer (`SYM[6][0] = '0'`). Falling through lets the symbol layer
+        // produce `0` while the base layer still returns `None` (BASE[6][0] is
+        // unprintable).
+        (0, 4) | (0, 2) | (1, 6) | (2, 3) => return None,
         _ => {}
     }
     let base = BASE[row][col];
@@ -195,5 +215,14 @@ mod tests {
         assert_eq!(key_for(0, 5, false, false), Some(KeyCode::Space));
         assert_eq!(key_for(0, 4, false, false), None); // Alt: handled separately
         assert_eq!(key_for(0, 2, false, false), None); // Symbol layer key
+    }
+
+    #[test]
+    fn zero_is_on_the_symbol_layer_at_mic_position() {
+        // Matrix (0, 6) is the Mic button on the base layer and the `0` digit
+        // on the symbol layer. The base layer must stay non-output while the
+        // symbol layer must emit `0`.
+        assert_eq!(key_for(0, 6, false, false), None, "Mic stays non-output");
+        assert_eq!(key_for(0, 6, true, false), Some(KeyCode::Char('0')));
     }
 }
