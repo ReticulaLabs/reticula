@@ -196,6 +196,8 @@ let lora = match lora_settings {
             settings.coding_rate,
             settings.tx_power_dbm,
         );
+        // The T-Deck's SX1262 module uses a TCXO on DIO3 (1.8 V); without
+        // DIO3-as-TCXO the XO never reaches STBY_XOSC and init fails.
         Some(
             reticulum_sdk::iface::lora::LoRaConfig::new(
                 "", // hardware provider supplies the bus
@@ -205,7 +207,9 @@ let lora = match lora_settings {
                 settings.spreading_factor,
                 settings.coding_rate,
             )
-            .with_embedded_hw(hw),
+            .with_embedded_hw(hw)
+            .with_tcxo_voltage(1.8)
+            .with_tcxo_startup_delay(Duration::from_millis(320)),
         )
     }
     _ => None,
