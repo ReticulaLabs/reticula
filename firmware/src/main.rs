@@ -157,7 +157,12 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             let result = EspNvs::new(nvs.clone(), "reticula", true).and_then(|mut nvs| {
                 nvs.set_str("wifi_enabled", if settings.enabled { "1" } else { "0" })?;
                 nvs.set_str("wifi_ssid", &settings.ssid)?;
-                nvs.set_str("wifi_pass", &settings.password)?;
+                // The settings screen cannot read the stored password back, so
+                // an empty field means "leave it unchanged" rather than "clear
+                // it"; otherwise saving any other change would wipe it.
+                if !settings.password.is_empty() {
+                    nvs.set_str("wifi_pass", &settings.password)?;
+                }
                 nvs.set_str("peer_addr", &settings.peer_addr)?;
                 nvs.set_str("peer_proto", proto)
             });

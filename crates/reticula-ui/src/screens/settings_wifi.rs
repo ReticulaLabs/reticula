@@ -127,6 +127,9 @@ impl SettingsWifiScreen {
         if !self.seeded {
             self.seeded = true;
             self.enabled = ctx.network.wifi_enabled;
+            // Seed the SSID from the current config so saving without retyping
+            // does not wipe it.
+            self.ssid_input = ctx.wifi_ssid.to_string();
             self.peer_input = ctx.peer_addr.to_string();
             self.peer_proto = ctx.peer_proto;
         }
