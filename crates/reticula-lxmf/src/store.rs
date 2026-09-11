@@ -88,24 +88,18 @@ impl MessageStore {
         if self.messages.is_empty() {
             return;
         }
-        // The removed message is indexed under its peer, which depends on
-        // direction (the other party of the conversation).
-        let peer = match self.direction[0] {
-            Direction::Inbound => self.messages[0].source_hash,
-            Direction::Outbound => self.messages[0].destination_hash,
-        };
         self.messages.remove(0);
         self.direction.remove(0);
-        // Every remaining message shifted down one index.
+        // Every remaining message shifted down one index. The evicted message
+        // was index 0, so drop that index from its peer's list before shifting
+        // the rest, then prune any peer that no longer has messages.
         for indexes in self.by_peer.values_mut() {
+            indexes.retain(|&i| i != 0);
             for i in indexes.iter_mut() {
-                *i = i.saturating_sub(1);
+                *i -= 1;
             }
         }
-        // Drop the entry that referred to the removed message.
-        if let Some(indexes) = self.by_peer.get_mut(&peer) {
-            indexes.retain(|&i| i != usize::MAX);
-        }
+        self.by_peer.retain(|_, indexes| !indexes.is_empty());
     }
 }
 
@@ -161,5 +155,25 @@ mod tests {
         assert_eq!(store.len(), 2);
         assert_eq!(store.all()[0].source_hash, [2u8; 16]);
         assert_eq!(store.all()[1].source_hash, [3u8; 16]);
+    }
+
+    #[test]
+    fn eviction_drops_evicted_peer_index() {
+        let mut store = MessageStore::new(2);
+        let a = [1u8; 16];
+        let b = [2u8; 16];
+        let c = [3u8; 16];
+
+        store.push(msg(a), Direction::Inbound);
+        store.push(msg(b), Direction::Inbound);
+        store.push(msg(c), Direction::Inbound);
+
+        // `a` was evicted: it must no longer resolve to any message, and the
+        // surviving peers must still map to their own messages.
+        assert_eq!(store.for_peer(&a).len(), 0);
+        assert_eq!(store.for_peer(&b).len(), 1);
+        assert_eq!(store.for_peer(&c).len(), 1);
+        assert_eq!(store.for_peer(&b)[0].source_hash, b);
+        assert_eq!(store.for_peer(&c)[0].source_hash, c);
     }
 }
