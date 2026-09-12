@@ -122,8 +122,12 @@ impl ChatListScreen {
         let width = size.width as i32;
         let height = size.height as i32;
 
-        let count = format!("{} conv", filtered.len());
-        widgets::draw_header(target, width, "Chat", &count, &ctx.network, theme).ok();
+        let right_label = widgets::hops_label(
+            self.selected_peer
+                .and_then(|peer| filtered.iter().find(|c| c.peer == peer))
+                .and_then(|c| c.hops),
+        );
+        widgets::draw_header(target, width, "Chat", &right_label, &ctx.network, theme).ok();
 
         let header_h = theme.line_h;
         let search_h = if self.filter.is_empty() { 0 } else { theme.line_h };

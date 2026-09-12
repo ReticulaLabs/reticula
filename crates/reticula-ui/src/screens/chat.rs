@@ -121,7 +121,13 @@ impl ChatScreen {
             })
             .unwrap_or(&fallback);
         let title = format!("{peer_name}");
-        widgets::draw_header(target, width, &title, "", &ctx.network, theme).ok();
+        let hops = ctx
+            .conversations
+            .iter()
+            .find(|c| c.peer == self.peer)
+            .and_then(|c| c.hops);
+        let right_label = widgets::hops_label(hops);
+        widgets::draw_header(target, width, &title, &right_label, &ctx.network, theme).ok();
 
         let body_top = theme.line_h;
         let composer_y = height - theme.line_h;

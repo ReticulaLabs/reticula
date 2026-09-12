@@ -36,7 +36,7 @@ pub const PATH_REDISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone)]
 pub enum NomadEvent {
     /// A `nomadnetwork/node` destination announced on the network.
-    NodeDiscovered { address: AddressHash, name: Option<String> },
+    NodeDiscovered { address: AddressHash, name: Option<String>, hops: u8 },
 }
 
 /// A NomadNet browser.
@@ -108,10 +108,10 @@ impl NomadClient {
                 let mut seen = self.discovered.lock().await;
                 if !seen.contains(&address) {
                     seen.push(address);
-                    debug!("nomad: discovered node {address} ({name:?})");
+                    debug!("nomad: discovered node {address} ({name:?}) at {} hops", announce.hops);
                     let _ = self
                         .events
-                        .send(NomadEvent::NodeDiscovered { address, name });
+                        .send(NomadEvent::NodeDiscovered { address, name, hops: announce.hops });
                 }
             }
         }

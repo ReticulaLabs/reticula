@@ -368,3 +368,13 @@ pub fn truncate(text: &str, max_chars: usize) -> String {
         s
     }
 }
+
+/// Format a destination's hop count for the status bar: `(5 hops)`, or the
+/// empty string when the hop count is unknown.
+pub fn hops_label(hops: Option<u8>) -> String {
+    match hops {
+        Some(1) => "(1 hop)".to_string(),
+        Some(n) => format!("({n} hops)"),
+        None => String::new(),
+    }
+}

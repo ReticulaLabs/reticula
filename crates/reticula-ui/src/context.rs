@@ -21,6 +21,8 @@ pub struct Conversation {
     pub unread: u32,
     /// Timestamp of the most recent message.
     pub last_ts: f64,
+    /// Hop count to this peer's delivery destination, if known.
+    pub hops: Option<u8>,
 }
 
 /// A single message shown in an open chat.
@@ -42,6 +44,8 @@ pub struct NodeEntry {
     pub hex: String,
     /// Node name from its announce, if any.
     pub name: String,
+    /// Hop count to this node's destination, if known.
+    pub hops: Option<u8>,
 }
 
 /// Global network / device state shown in headers and status bars.

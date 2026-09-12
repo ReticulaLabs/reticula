@@ -507,10 +507,21 @@ impl<B: Board> ReticulaApp<B> {
             match nomad.fetch_page(AddressHash::new(node), &path).await {
                 Ok(page) => {
                     *shared.page.lock().unwrap() = Some(page);
+                    // Carry the node's discovered name/hops (if any) into the
+                    // page view so its header can show them.
+                    let known = shared
+                        .nodes
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|n| n.address == node)
+                        .map(|n| (n.name.clone(), n.hops))
+                        .unwrap_or_default();
                     *shared.page_node.lock().unwrap() = Some(NodeEntry {
                         address: node,
                         hex: AddressHash::new(node).to_hex_string(),
-                        name: String::new(),
+                        name: known.0,
+                        hops: known.1,
                     });
                     *shared.page_notice.lock().unwrap() = String::new();
                 }
@@ -527,20 +538,26 @@ impl<B: Board> ReticulaApp<B> {
                 self.refresh_conversations();
                 self.refresh_messages();
             }
-LxmfEvent::ContactDiscovered { address, name } => {
+LxmfEvent::ContactDiscovered { address, name, hops } => {
                 let mut contacts = self.shared.contacts.lock().unwrap();
-                if !contacts.iter().any(|c| c.peer == address) {
-                    let name = name.unwrap_or_default();
-                    contacts.push(Conversation {
-                        peer: address,
-                        peer_hex: AddressHash::new(address).to_hex_string(),
-                        peer_name: name.clone(),
-                        last_title: name,
-                        last_content: String::new(),
-                        unread: 0,
-                        last_ts: 0.0,
-                    });
-                    info!("reticula: discovered LXMF contact {address:02x?}");
+                match contacts.iter_mut().find(|c| c.peer == address) {
+                    // A re-announce may report a better (shorter) path; keep
+                    // the hop count fresh for the status bar.
+                    Some(existing) => existing.hops = Some(hops),
+                    None => {
+                        let name = name.unwrap_or_default();
+                        contacts.push(Conversation {
+                            peer: address,
+                            peer_hex: AddressHash::new(address).to_hex_string(),
+                            peer_name: name.clone(),
+                            last_title: name,
+                            last_content: String::new(),
+                            unread: 0,
+                            last_ts: 0.0,
+                            hops: Some(hops),
+                        });
+                        info!("reticula: discovered LXMF contact {address:02x?}");
+                    }
                 }
                 drop(contacts);
                 self.refresh_conversations();
@@ -559,15 +576,21 @@ LxmfEvent::ContactDiscovered { address, name } => {
     }
 
     fn on_nomad_event(&mut self, ev: NomadEvent) {
-        let NomadEvent::NodeDiscovered { address, name } = ev;
+        let NomadEvent::NodeDiscovered { address, name, hops } = ev;
         let peer: [u8; 16] = address.as_slice().try_into().unwrap();
         let mut nodes = self.shared.nodes.lock().unwrap();
-        if !nodes.iter().any(|n| n.address == peer) {
-            nodes.push(NodeEntry {
-                address: peer,
-                hex: address.to_hex_string(),
-                name: name.unwrap_or_default(),
-            });
+        match nodes.iter_mut().find(|n| n.address == peer) {
+            // A re-announce may report a better (shorter) path; keep the hop
+            // count fresh for the status bar.
+            Some(existing) => existing.hops = Some(hops),
+            None => {
+                nodes.push(NodeEntry {
+                    address: peer,
+                    hex: address.to_hex_string(),
+                    name: name.unwrap_or_default(),
+                    hops: Some(hops),
+                });
+            }
         }
     }
 
@@ -596,13 +619,18 @@ LxmfEvent::ContactDiscovered { address, name } => {
 
         // Include LXMF contacts discovered from announces that have no
         // messages yet, so announced peers show up in the chat list. Also
-        // build a peer→name map so conversations can show real names.
+        // build peer→name and peer→hops maps so conversations can show real
+        // names and the selected destination's hop count.
         let mut name_by_peer: HashMap<[u8; 16], String> = HashMap::new();
+        let mut hops_by_peer: HashMap<[u8; 16], u8> = HashMap::new();
         {
             let contacts = self.shared.contacts.lock().unwrap();
             for c in contacts.iter() {
                 if !c.last_title.is_empty() {
                     name_by_peer.entry(c.peer).or_insert_with(|| c.last_title.clone());
+                }
+                if let Some(hops) = c.hops {
+                    hops_by_peer.insert(c.peer, hops);
                 }
                 by_peer.entry(c.peer).or_insert_with(|| {
                     (
@@ -625,6 +653,7 @@ LxmfEvent::ContactDiscovered { address, name } => {
                 last_title,
                 unread,
                 last_ts,
+                hops: hops_by_peer.get(&peer).copied(),
             })
             .collect();
         conversations.sort_by(|a, b| {

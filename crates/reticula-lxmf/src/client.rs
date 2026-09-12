@@ -40,7 +40,7 @@ pub enum LxmfEvent {
     /// An outbound message was handed to the transport for delivery.
     MessageSent(Arc<LxmfMessage>),
     /// A peer announced its `lxmf/delivery` destination (a chat contact).
-    ContactDiscovered { address: [u8; 16], name: Option<String> },
+    ContactDiscovered { address: [u8; 16], name: Option<String>, hops: u8 },
     /// A link to or from a peer became active.
     PeerConnected(AddressHash),
     /// A link to or from a peer closed.
@@ -192,10 +192,11 @@ impl LxmfClient {
                 let mut seen = self.discovered.lock().await;
                 if !seen.contains(&address) {
                     seen.push(address);
-                    info!("lxmf: discovered contact {address} ({name:?})");
+                    info!("lxmf: discovered contact {address} ({name:?}) at {} hops", announce.hops);
                     let _ = self.events.send(LxmfEvent::ContactDiscovered {
                         address: address.as_slice().try_into().unwrap(),
                         name,
+                        hops: announce.hops,
                     });
                 }
             }

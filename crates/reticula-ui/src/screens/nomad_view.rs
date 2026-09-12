@@ -73,7 +73,8 @@ impl NomadViewScreen {
             .map(|n| n.name.as_str())
             .unwrap_or(&fallback);
         let title = format!("{node_name}");
-        widgets::draw_header(target, width, &title, "", &ctx.network, theme).ok();
+        let right_label = widgets::hops_label(ctx.page_node.and_then(|n| n.hops));
+        widgets::draw_header(target, width, &title, &right_label, &ctx.network, theme).ok();
 
         let body_top = theme.line_h;
         let body = Rectangle::new(

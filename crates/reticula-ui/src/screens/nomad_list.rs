@@ -89,8 +89,12 @@ impl NomadListScreen {
         let width = size.width as i32;
         let height = size.height as i32;
 
-        let count_label = format!("{} nodes", filtered.len());
-        widgets::draw_header(target, width, "NomadNet", &count_label, &ctx.network, theme).ok();
+        let right_label = widgets::hops_label(
+            self.selected
+                .and_then(|addr| filtered.iter().find(|n| n.address == addr))
+                .and_then(|n| n.hops),
+        );
+        widgets::draw_header(target, width, "NomadNet", &right_label, &ctx.network, theme).ok();
 
         let header_h = theme.line_h;
         let search_h = if self.filter.is_empty() { 0 } else { theme.line_h };
