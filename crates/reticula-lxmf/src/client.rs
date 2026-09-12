@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Instant;
 
 use log::{debug, info, trace, warn};
 use rmpv::Value;
@@ -26,6 +27,10 @@ pub const APP_NAME: &str = "lxmf";
 pub const DELIVERY_ASPECT: &str = "delivery";
 /// How long to wait for a link to a peer to activate before giving up.
 pub const LINK_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long to wait for a path request to re-install a destination that the
+/// transport pruned (the `embedded` build expires destinations 120s after
+/// their last announce) before giving up on the send.
+pub const PATH_REDISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Events the LXMF client emits to the rest of the application.
 #[derive(Debug, Clone)]
@@ -306,28 +311,61 @@ impl LxmfClient {
 
     /// Ensure an outbound link to `peer` exists; create one if needed.
     async fn ensure_link(&self, peer: AddressHash) -> Result<LinkId, LxmfError> {
+        // Reuse a cached link only while it is still alive. A link that
+        // closed (or whose `Closed` event was missed) must not be reused:
+        // `send_packed` would otherwise wait out `LINK_ACTIVATION_TIMEOUT` on
+        // a dead link for every message instead of establishing a fresh one.
         if let Some(&link_id) = self.links.lock().await.get(&peer) {
-            return Ok(link_id);
+            if self.link_is_active(&link_id).await {
+                return Ok(link_id);
+            }
+            self.links.lock().await.remove(&peer);
         }
 
-        let desc = self
-            .transport
-            .get_out_destination(&peer)
-            .await
-            .ok_or(LxmfError::NoPathToDestination(peer.as_slice().try_into().unwrap()))?
-            .lock()
-            .await
-            .desc;
+        // The transport prunes its destination cache aggressively on embedded
+        // targets (120s without a re-announce), so a destination we saw
+        // earlier can be gone by the time the user sends. When that happens,
+        // ask the mesh for a fresh path and wait for the path response /
+        // announce to re-install the destination, instead of failing the send
+        // outright. `request_path` is rate-limited per destination (20s), so
+        // repeated sends cannot spam the network.
+        let desc = match self.transport.get_out_destination(&peer).await {
+            Some(dest) => dest.lock().await.desc,
+            None => {
+                self.transport.request_path(&peer, None, None).await;
+                let deadline = Instant::now() + PATH_REDISCOVERY_TIMEOUT;
+                loop {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    if let Some(dest) = self.transport.get_out_destination(&peer).await {
+                        break dest.lock().await.desc;
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(LxmfError::NoPathToDestination(
+                            peer.as_slice().try_into().unwrap(),
+                        ));
+                    }
+                }
+            }
+        };
+
+        // Request a path so the link request below can be routed directly
+        // rather than broadcast (fresh path, faster establishment).
+        self.transport.request_path(&peer, None, None).await;
 
         let link = self.transport.link(desc).await;
         let link_id = *link.lock().await.id();
 
-        // Request a path in case announce propagation needs a nudge.
-        self.transport.request_path(&peer, None, None).await;
-
         self.links.lock().await.insert(peer, link_id);
         debug!("lxmf: established outbound link {} to {}", link_id, peer);
         Ok(link_id)
+    }
+
+    /// True if the outbound link with `link_id` exists and is not closed.
+    async fn link_is_active(&self, link_id: &LinkId) -> bool {
+        match self.transport.find_out_link(link_id).await {
+            Some(link) => link.lock().await.status() != LinkStatus::Closed,
+            None => false,
+        }
     }
 
     /// Handle an incoming link event (inbound or outbound).

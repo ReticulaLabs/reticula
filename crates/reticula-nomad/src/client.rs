@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use log::{debug, trace};
 use rmpv::Value;
@@ -26,6 +27,10 @@ pub const DEFAULT_PAGE_PATH: &str = "/page/index.mu";
 pub const PAGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long to wait for an outbound link to a node to activate.
 pub const LINK_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long to wait for a path request to re-install a node destination that
+/// the transport pruned (the `embedded` build expires destinations 120s after
+/// their last announce) before giving up on the fetch.
+pub const PATH_REDISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Events the NomadNet browser emits to the rest of the application.
 #[derive(Debug, Clone)]
@@ -236,15 +241,32 @@ impl NomadClient {
             self.links.lock().await.remove(&node);
         }
 
-        let desc = self
-            .transport
-            .get_out_destination(&node)
-            .await
-            .ok_or_else(|| NomadError::NoLink(node.to_hex_string()))?
-            .lock()
-            .await
-            .desc;
+        // The transport prunes its destination cache aggressively on embedded
+        // targets (120s without a re-announce), so a node we discovered can
+        // be gone by the time the user browses. When that happens, ask the
+        // mesh for a fresh path and wait for the path response / announce to
+        // re-install the destination, instead of failing the fetch outright.
+        // `request_path` is rate-limited per destination (20s), so repeated
+        // fetches cannot spam the network.
+        let desc = match self.transport.get_out_destination(&node).await {
+            Some(dest) => dest.lock().await.desc,
+            None => {
+                self.transport.request_path(&node, None, None).await;
+                let deadline = Instant::now() + PATH_REDISCOVERY_TIMEOUT;
+                loop {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    if let Some(dest) = self.transport.get_out_destination(&node).await {
+                        break dest.lock().await.desc;
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(NomadError::NoLink(node.to_hex_string()));
+                    }
+                }
+            }
+        };
 
+        // Request a path so the link request below can be routed directly
+        // rather than broadcast (fresh path, faster establishment).
         self.transport.request_path(&node, None, None).await;
 
         let link = self.transport.link(desc).await;
