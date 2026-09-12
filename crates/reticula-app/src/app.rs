@@ -503,26 +503,27 @@ impl<B: Board> ReticulaApp<B> {
         let shared = self.shared.clone();
         *shared.page.lock().unwrap() = None;
         *shared.page_notice.lock().unwrap() = format!("Fetching {path}…");
+        // Point the page view at the node up front, so the header shows its
+        // announced name (and hops) while the page is still loading instead
+        // of the address prefix / a stale previous node.
+        let entry = {
+            let nodes = shared.nodes.lock().unwrap();
+            nodes
+                .iter()
+                .find(|n| n.address == node)
+                .cloned()
+                .unwrap_or_else(|| NodeEntry {
+                    address: node,
+                    hex: AddressHash::new(node).to_hex_string(),
+                    name: String::new(),
+                    hops: None,
+                })
+        };
+        *shared.page_node.lock().unwrap() = Some(entry);
         tokio::spawn(async move {
             match nomad.fetch_page(AddressHash::new(node), &path).await {
                 Ok(page) => {
                     *shared.page.lock().unwrap() = Some(page);
-                    // Carry the node's discovered name/hops (if any) into the
-                    // page view so its header can show them.
-                    let known = shared
-                        .nodes
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .find(|n| n.address == node)
-                        .map(|n| (n.name.clone(), n.hops))
-                        .unwrap_or_default();
-                    *shared.page_node.lock().unwrap() = Some(NodeEntry {
-                        address: node,
-                        hex: AddressHash::new(node).to_hex_string(),
-                        name: known.0,
-                        hops: known.1,
-                    });
                     *shared.page_notice.lock().unwrap() = String::new();
                 }
                 Err(e) => {
