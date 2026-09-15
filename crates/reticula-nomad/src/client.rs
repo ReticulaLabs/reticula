@@ -45,6 +45,9 @@ pub struct NomadClient {
     events: broadcast::Sender<NomadEvent>,
     /// Outbound links per node, keyed by node address.
     links: Mutex<HashMap<AddressHash, LinkId>>,
+    /// The interface each node was last seen reachable over, keyed by node
+    /// address. Populated from the interface a page-fetch link is carried on.
+    node_ifaces: std::sync::Mutex<HashMap<AddressHash, AddressHash>>,
     /// Discovered node addresses, in discovery order.
     discovered: Mutex<Vec<AddressHash>>,
 }
@@ -56,6 +59,7 @@ impl NomadClient {
             transport,
             events,
             links: Mutex::new(HashMap::new()),
+            node_ifaces: std::sync::Mutex::new(HashMap::new()),
             discovered: Mutex::new(Vec::new()),
         }
     }
@@ -136,6 +140,12 @@ impl NomadClient {
         // will fail or be dropped. If the link never activates (no path /
         // node unreachable) it will close and we surface that cleanly.
         self.wait_for_link_active(link_id).await?;
+
+        // The active link is bound to the interface it is carried on; record
+        // it so the UI can show how the node is reachable.
+        if let Some(iface) = self.link_interface(&link_id).await {
+            self.node_ifaces.lock().unwrap().insert(node, iface);
+        }
 
         let request_id = self
             .transport
@@ -282,6 +292,20 @@ impl NomadClient {
             Some(link) => link.lock().await.status() != LinkStatus::Closed,
             None => false,
         }
+    }
+
+    /// The interface the active outbound link with `link_id` is bound to, if
+    /// the link exists.
+    async fn link_interface(&self, link_id: &LinkId) -> Option<AddressHash> {
+        match self.transport.find_out_link(link_id).await {
+            Some(link) => link.lock().await.attached_interface(),
+            None => None,
+        }
+    }
+
+    /// The interface `node` was last seen reachable over, if known.
+    pub fn node_interface(&self, node: AddressHash) -> Option<AddressHash> {
+        self.node_ifaces.lock().unwrap().get(&node).copied()
     }
 }
 

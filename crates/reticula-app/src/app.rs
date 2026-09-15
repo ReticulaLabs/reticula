@@ -136,6 +136,10 @@ pub struct ReticulaApp<B: Board> {
     notice: String,
     /// Set when the app must restart (identity regenerated / WiFi changed).
     restart_requested: bool,
+    /// Interface address of the IP (WiFi) Reticulum interface, if configured.
+    wifi_iface: Option<[u8; 16]>,
+    /// Interface address of the LoRa radio interface, if configured.
+    lora_iface: Option<[u8; 16]>,
     /// Whether a LoRa radio interface is active (`None` = not configured).
     lora_online: Option<bool>,
 }
@@ -157,7 +161,8 @@ impl<B: Board> ReticulaApp<B> {
         persist_wifi: Option<PersistWifi>,
         persist_lora: Option<PersistLora>,
     ) -> Result<Self, AppError> {
-        let (transport, delivery) = build_transport(&identity, &net).await?;
+        let (transport, delivery, wifi_iface, lora_iface) =
+            build_transport(&identity, &net).await?;
 
         let store = Arc::new(std::sync::Mutex::new(MessageStore::new(MAX_MESSAGES)));
         let lxmf = Arc::new(LxmfClient::new(
@@ -227,6 +232,8 @@ impl<B: Board> ReticulaApp<B> {
             lora_settings,
             notice: String::new(),
             restart_requested: false,
+            wifi_iface,
+            lora_iface,
             lora_online: {
                 #[cfg(feature = "lora")]
                 {
@@ -686,8 +693,28 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
         *self.shared.messages.lock().unwrap() = messages;
     }
 
+    /// The interface the currently shown destination is reachable over, if known.
+    ///
+    /// Only screens focused on a single destination (an open chat with an LXMF
+    /// peer, or a NomadNet page viewer) report one; the header uses it to mark
+    /// the WiFi or LoRa status icon.
+    fn active_dest_iface(&self) -> Option<[u8; 16]> {
+        match &self.screen {
+            Screen::Chat(chat) => self
+                .lxmf
+                .peer_interface(AddressHash::new(chat.peer))
+                .map(|iface| iface.as_slice().try_into().unwrap()),
+            Screen::NomadView(view) => self
+                .nomad
+                .node_interface(AddressHash::new(view.node))
+                .map(|iface| iface.as_slice().try_into().unwrap()),
+            _ => None,
+        }
+    }
+
     /// Render one frame and flush it to the display.
     fn render(&mut self) {
+        let dest_iface = self.active_dest_iface();
         let Self {
             board,
             theme,
@@ -733,6 +760,9 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
                 wifi_enabled: *wifi_enabled,
                 wifi_rssi: board.wifi_status().map(|w| w.1),
                 lora_online: self.lora_online,
+                dest_iface,
+                wifi_iface: self.wifi_iface,
+                lora_iface: self.lora_iface,
             },
         };
 
@@ -748,7 +778,15 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
 async fn build_transport(
     identity: &PrivateIdentity,
     net: &NetConfig,
-) -> Result<(Arc<Transport>, Arc<AsyncMutex<SingleInputDestination>>), AppError> {
+) -> Result<
+    (
+        Arc<Transport>,
+        Arc<AsyncMutex<SingleInputDestination>>,
+        Option<[u8; 16]>,
+        Option<[u8; 16]>,
+    ),
+    AppError,
+> {
     let mut config = TransportConfig::new("reticula", identity, false);
     // End-client only: never retransmit/forward for others.
     config.set_retransmit(false);
@@ -768,14 +806,22 @@ async fn build_transport(
 
     let mut transport = Transport::new(config);
 
+    // Interface address of the IP (WiFi) Reticulum interface, if configured.
+    let mut wifi_iface = None;
+    // Interface address of the LoRa radio interface, if configured. Assigned
+    // only under the `lora` feature.
+    #[allow(unused_mut)]
+    let mut lora_iface = None;
+
     match &net.transport {
         crate::TransportKind::Udp { bind, forward } => {
             let iface = UdpInterface::new(bind.to_string(), forward.clone());
-            transport
+            let address = transport
                 .iface_manager()
                 .lock()
                 .await
                 .spawn(iface, UdpInterface::spawn);
+            wifi_iface = Some(address.as_slice().try_into().unwrap());
             info!("reticulum: UDP interface bound to {bind}");
         }
         crate::TransportKind::TcpPeer { addr } => {
@@ -785,11 +831,12 @@ async fn build_transport(
             // expire quickly, keeping memory bounded on the busy network.
             let iface = TcpClient::new(addr.to_string())
                 .with_interface_mode(InterfaceMode::Roaming);
-            transport
+            let address = transport
                 .iface_manager()
                 .lock()
                 .await
                 .spawn(iface, TcpClient::spawn);
+            wifi_iface = Some(address.as_slice().try_into().unwrap());
             info!("reticulum: TCP client interface to {addr} (roaming mode)");
         }
         crate::TransportKind::None => {
@@ -805,11 +852,12 @@ async fn build_transport(
         use reticulum_sdk::iface::lora::sx1262::SX1262;
         if let Some(lora) = &net.lora {
             let iface = LoRaInterface::<SX1262>::new(lora.clone());
-            transport
+            let address = transport
                 .iface_manager()
                 .lock()
                 .await
                 .spawn(iface, LoRaInterface::spawn);
+            lora_iface = Some(address.as_slice().try_into().unwrap());
             info!("reticulum: LoRa interface configured");
         }
     }
@@ -826,7 +874,7 @@ async fn build_transport(
     // callback calls `packet.prove()`); senders wait for these proofs to
     // confirm delivery, and without them they retransmit.
     delivery.lock().await.set_prove_packets(true);
-    Ok((Arc::new(transport), delivery))
+    Ok((Arc::new(transport), delivery, wifi_iface, lora_iface))
 }
 
 fn now_f64() -> f64 {

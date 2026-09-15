@@ -235,6 +235,27 @@ where
     let wifi_x = lora_x - 2 - wifi_icon_w;
     draw_wifi_icon(target, Point::new(wifi_x, 1), wifi_level, wifi_color)?;
 
+    // A solid red line under the WiFi or LoRa icon marks the interface the
+    // currently shown destination is available via. Drawn at the header's
+    // base row, directly under the icon glyphs.
+    if let Some(dest_iface) = network.dest_iface {
+        let underline_y = height - 1;
+        if network.wifi_iface == Some(dest_iface) {
+            fill_rect(
+                target,
+                Rectangle::new(Point::new(wifi_x, underline_y), px(wifi_icon_w, 1)),
+                theme.danger,
+            )?;
+        }
+        if network.lora_iface == Some(dest_iface) {
+            fill_rect(
+                target,
+                Rectangle::new(Point::new(lora_x, underline_y), px(lora_icon_w, 1)),
+                theme.danger,
+            )?;
+        }
+    }
+
     // Right label (counts etc.) to the left of the icons.
     if !right_label.is_empty() {
         let max = ((wifi_x - 2) / cw).max(1) as usize;

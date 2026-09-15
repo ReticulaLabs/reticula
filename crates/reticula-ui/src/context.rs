@@ -65,6 +65,12 @@ pub struct NetworkState {
     pub wifi_rssi: Option<i8>,
     /// Whether the LoRa radio interface is online. `None` when not configured.
     pub lora_online: Option<bool>,
+    /// Interface the currently shown destination is reachable over, if known.
+    pub dest_iface: Option<[u8; 16]>,
+    /// Interface address of the IP (WiFi) Reticulum interface, if configured.
+    pub wifi_iface: Option<[u8; 16]>,
+    /// Interface address of the LoRa radio interface, if configured.
+    pub lora_iface: Option<[u8; 16]>,
 }
 
 /// Immutable snapshot of application state for one rendered frame.

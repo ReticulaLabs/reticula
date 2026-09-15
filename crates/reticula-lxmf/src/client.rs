@@ -69,6 +69,9 @@ pub struct LxmfClient {
     events: broadcast::Sender<LxmfEvent>,
     /// Outbound links we established per peer, keyed by peer address hash.
     links: Mutex<HashMap<AddressHash, LinkId>>,
+    /// The interface each peer was last seen reachable over, keyed by peer
+    /// address hash. Populated from the interface id carried on link events.
+    peer_ifaces: std::sync::Mutex<HashMap<AddressHash, AddressHash>>,
     /// LXMF delivery destinations discovered from announces, in discovery order.
     discovered: Mutex<Vec<AddressHash>>,
     /// Hashes of recently received messages. The reference implementation keeps
@@ -103,6 +106,7 @@ impl LxmfClient {
             store,
             events,
             links: Mutex::new(HashMap::new()),
+            peer_ifaces: std::sync::Mutex::new(HashMap::new()),
             discovered: Mutex::new(Vec::new()),
             seen: Mutex::new(VecDeque::new()),
         }
@@ -146,6 +150,11 @@ impl LxmfClient {
             "lxmf: announced delivery destination {}",
             self.identity.address_hash()
         );
+    }
+
+    /// The interface `peer` was last seen reachable over, if known.
+    pub fn peer_interface(&self, peer: AddressHash) -> Option<AddressHash> {
+        self.peer_ifaces.lock().unwrap().get(&peer).copied()
     }
 
     /// The address hash of the `lxmf/delivery` destination that `identity`
@@ -373,9 +382,14 @@ impl LxmfClient {
     async fn handle_link_event(&self, ev: LinkEventData) {
         match ev.event {
             LinkEvent::Data(payload) => {
-                self.handle_link_data(ev.id, payload.as_slice()).await;
+                self.handle_link_data(ev.id, ev.iface, payload.as_slice()).await;
             }
             LinkEvent::Activated => {
+                // The link event now carries the interface the link is carried
+                // on; record it so the UI can show how a peer is reachable.
+                if let Some(iface) = ev.iface {
+                    self.peer_ifaces.lock().unwrap().insert(ev.address_hash, iface);
+                }
                 if let Some(peer) = self.peer_for_link(ev.id).await {
                     debug!("lxmf: peer connected: {}", peer);
                     let _ = self.events.send(LxmfEvent::PeerConnected(peer));
@@ -393,12 +407,22 @@ impl LxmfClient {
     }
 
     /// Attempt to parse link payload bytes as an LXMF message.
-    async fn handle_link_data(&self, _link_id: LinkId, payload: &[u8]) {
+    async fn handle_link_data(&self, _link_id: LinkId, iface: Option<AddressHash>, payload: &[u8]) {
         debug!("lxmf: link data arrived ({len} bytes)", len = payload.len());
         let Some(message) = self.unpack_message(payload).await else {
             debug!("lxmf: link data could not be unpacked");
             return;
         };
+
+        // Record the interface the sender is reachable over (for in-links the
+        // link's destination is our own delivery address, so the peer address
+        // comes from the message source).
+        if let Some(iface) = iface {
+            self.peer_ifaces
+                .lock()
+                .unwrap()
+                .insert(AddressHash::new(message.source_hash), iface);
+        }
 
         // Only accept messages addressed to this client's LXMF address.
         let is_ours = message.destination_hash == self.delivery_address.as_slice()[..];
