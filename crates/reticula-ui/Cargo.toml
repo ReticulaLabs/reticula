@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 embedded-graphics = "0.8"
+qrcodegen = "1.8"
 reticula-hal = { path = "../reticula-hal" }
 reticula-nomad = { path = "../reticula-nomad" }
 

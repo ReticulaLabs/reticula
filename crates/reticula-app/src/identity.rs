@@ -10,6 +10,13 @@ use getrandom::SysRng;
 use rand_core::UnwrapErr;
 use reticulum_sdk::identity::PrivateIdentity;
 
+/// The public identity key as hex: `hex(X25519 public key ‖ Ed25519 signing
+/// public key)` (64 bytes → 128 hex chars). This is the `public_key` half of
+/// the `lxma://` QR format used by the Columba client.
+pub fn public_key_hex(identity: &PrivateIdentity) -> String {
+    identity.as_identity().to_hex_string()
+}
+
 /// Load the identity from `path`, or create a new one and persist it.
 ///
 /// Passing `None` skips persistence and always generates a fresh identity
@@ -54,5 +61,11 @@ mod tests {
         let b = load_or_create(Some(&path));
         assert_eq!(a.to_hex_string(), b.to_hex_string());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn public_key_hex_is_128_chars() {
+        let identity = load_or_create(None);
+        assert_eq!(public_key_hex(&identity).len(), 128);
     }
 }

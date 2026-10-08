@@ -111,6 +111,7 @@ pub struct ReticulaApp<B: Board> {
     identity: PrivateIdentity,
     display_name: String,
     identity_hex: String,
+    public_key_hex: String,
     shared: Arc<SharedState>,
     screen: Screen,
     back_stack: Vec<Screen>,
@@ -177,6 +178,8 @@ impl<B: Board> ReticulaApp<B> {
         // Show the LXMF delivery address (what peers use to message us), not
         // the raw identity key hex.
         let identity_hex = lxmf.delivery_address().to_hex_string();
+        // The public identity key as hex, for the `lxma://` QR format.
+        let public_key_hex = crate::identity::public_key_hex(&identity);
         let wifi_ssid = board.wifi_ssid().unwrap_or_default();
         let wifi_enabled = net.wifi_enabled;
         // Current remote peer from the transport config, for the WiFi settings
@@ -217,6 +220,7 @@ impl<B: Board> ReticulaApp<B> {
             identity,
             display_name,
             identity_hex,
+            public_key_hex,
             shared: Arc::new(SharedState::default()),
             screen: Screen::Home(HomeScreen::new()),
             back_stack: Vec::new(),
@@ -721,6 +725,7 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
             screen,
             shared,
             identity_hex,
+            public_key_hex,
             display_name,
             wifi_ssid,
             wifi_enabled,
@@ -746,6 +751,7 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
             page_node: page_node.as_ref(),
             page_notice: &page_notice,
             identity_hex: identity_hex.as_str(),
+            public_key_hex: public_key_hex.as_str(),
             display_name: display_name.as_str(),
             notice: notice.as_str(),
             wifi_ssid: wifi_ssid.as_str(),

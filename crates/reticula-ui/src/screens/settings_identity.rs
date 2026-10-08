@@ -14,6 +14,12 @@ use crate::screens::ListState;
 use crate::theme::Theme;
 use crate::widgets::{self, px};
 
+/// Maximum on-screen size (px) of the identity QR code, including its quiet
+/// zone. The symbol is scaled to whole pixels and centred within this box;
+/// the actual size depends on the QR version (a 168-char `lxma://` identity is
+/// 53×53 modules at Medium ECC, so ~122 px at 2 px/module).
+const QR_MAX: i32 = 130;
+
 #[derive(Default)]
 pub struct SettingsIdentityScreen {
     pub state: ListState,
@@ -177,8 +183,33 @@ impl SettingsIdentityScreen {
             y += theme.line_h;
         }
 
-        // LXMF address.
+        // QR code of the identity, centred in the remaining space. Encoded in
+        // the `lxma://<destination_hash_hex>:<public_key_hex>` format used by
+        // the Columba client, so a scan yields a value peers can import to
+        // add us as a contact and encrypt to us.
         y += theme.line_h;
+        widgets::draw_text(
+            target,
+            Point::new(0, y),
+            "Scan to add contact:",
+            theme.text_dim,
+            theme,
+        )
+        .ok();
+        y += theme.line_h;
+        let qr_text = format!("lxma://{}:{}", ctx.identity_hex, ctx.public_key_hex);
+        let qr_size = widgets::draw_qr(
+            target,
+            Point::new((width - QR_MAX) / 2, y),
+            &qr_text,
+            QR_MAX,
+            theme.background,
+            theme.text,
+        )
+        .unwrap_or(0);
+        y += qr_size + theme.line_h;
+
+        // LXMF address.
         widgets::draw_text(target, Point::new(0, y), "LXMF address:", theme.text_dim, theme).ok();
         y += theme.line_h;
         widgets::draw_wrapped(

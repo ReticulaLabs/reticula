@@ -90,6 +90,8 @@ pub struct ViewContext<'a> {
     pub page_notice: &'a str,
     /// Our LXMF address hash as hex.
     pub identity_hex: &'a str,
+    /// Our public identity key as hex (128 chars), for the `lxma://` QR format.
+    pub public_key_hex: &'a str,
     /// Our configured display name.
     pub display_name: &'a str,
     /// A transient notice (e.g. "restarting…") shown on the settings screens.

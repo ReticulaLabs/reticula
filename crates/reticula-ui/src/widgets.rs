@@ -379,6 +379,54 @@ where
     )
 }
 
+/// Draw a QR code encoding `text`, centred within a `max_size`×`max_size`
+/// box whose top-left corner is `top_left`.
+///
+/// The symbol is scaled to whole pixels per module (no fractional scaling, so
+/// edges stay crisp on the low-resolution LCD) and includes the standard
+/// 4-module quiet zone. Returns the on-screen size of the drawn symbol
+/// (including the quiet zone), or `0` if the text could not be encoded.
+pub fn draw_qr<D>(
+    target: &mut D,
+    top_left: Point,
+    text: &str,
+    max_size: i32,
+    dark: Rgb565,
+    light: Rgb565,
+) -> Result<i32, D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let qr = match qrcodegen::QrCode::encode_text(text, qrcodegen::QrCodeEcc::Medium) {
+        Ok(qr) => qr,
+        Err(_) => return Ok(0),
+    };
+
+    let modules = qr.size();
+    let quiet = 4;
+    let total = modules + quiet * 2;
+    // Whole-pixel scale so each module is a crisp block; at least 1 px.
+    let scale = (max_size / total).max(1);
+    let size = total * scale;
+    // Centre the symbol within the requested box.
+    let origin = top_left + Point::new((max_size - size) / 2, (max_size - size) / 2);
+
+    // Quiet zone + light modules.
+    fill_rect(target, Rectangle::new(origin, px(size, size)), light)?;
+
+    // Dark modules.
+    for y in 0..modules {
+        for x in 0..modules {
+            if qr.get_module(x, y) {
+                let at = origin + Point::new((x + quiet) * scale, (y + quiet) * scale);
+                fill_rect(target, Rectangle::new(at, px(scale, scale)), dark)?;
+            }
+        }
+    }
+
+    Ok(size)
+}
+
 /// Truncate `text` to `max_chars` for single-line display.
 pub fn truncate(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
