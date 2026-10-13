@@ -35,6 +35,7 @@ use reticula_ui::screens::new_chat::NewChatScreen;
 use reticula_ui::screens::nomad_list::NomadListScreen;
 use reticula_ui::screens::nomad_view::NomadViewScreen;
 use reticula_ui::screens::settings::SettingsScreen;
+use reticula_ui::screens::settings_data::SettingsDataScreen;
 use reticula_ui::screens::settings_identity::SettingsIdentityScreen;
 use reticula_ui::screens::settings_lora::SettingsLoraScreen;
 use reticula_ui::screens::settings_wifi::SettingsWifiScreen;
@@ -496,6 +497,7 @@ impl<B: Board> ReticulaApp<B> {
             ScreenId::SettingsIdentity => Screen::SettingsIdentity(SettingsIdentityScreen::new()),
             ScreenId::SettingsWifi => Screen::SettingsWifi(SettingsWifiScreen::new()),
             ScreenId::SettingsLora => Screen::SettingsLora(SettingsLoraScreen::new()),
+            ScreenId::SettingsData => Screen::SettingsData(SettingsDataScreen::new()),
             ScreenId::Chat | ScreenId::NomadView => return, // opened with context
         };
         self.push(screen);

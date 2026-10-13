@@ -10,12 +10,14 @@ pub enum ScreenId {
     NomadList,
     NomadView,
     Settings,
-    /// Sub-menu: identity info and identity regeneration.
+    /// Sub-menu: identity info.
     SettingsIdentity,
     /// Sub-menu: WiFi network SSID / password.
     SettingsWifi,
     /// Sub-menu: LoRa radio configuration.
     SettingsLora,
+    /// Sub-menu: destructive data operations (identity regeneration).
+    SettingsData,
 }
 
 /// LoRa radio configuration, as shown in the Settings → LoRa sub-menu.

@@ -1,5 +1,5 @@
 //! Settings sub-menu: Reticulum identity — LXMF address, display name, and
-//! identity regeneration.
+//! re-announcing our identities.
 
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::geometry::Point;
@@ -84,7 +84,7 @@ impl SettingsIdentityScreen {
                     self.name_input.clear();
                     Command::None
                 }
-                _ => Command::RegenerateIdentity,
+                _ => Command::Announce,
             },
             KeyCode::Esc => Command::Back,
             _ => Command::None,
@@ -139,9 +139,9 @@ impl SettingsIdentityScreen {
             y += theme.line_h;
         }
 
-        // Row 1: regenerate identity.
+        // Row 1: re-announce identities.
         let at = Point::new(0, y);
-        let label = "Regenerate identity";
+        let label = "Re-announce identities";
         if self.state.selected == 1 {
             widgets::draw_highlight(
                 target,
@@ -156,25 +156,6 @@ impl SettingsIdentityScreen {
         } else {
             widgets::draw_text(target, at, label, theme.text, theme).ok();
         }
-        y += theme.line_h;
-
-        widgets::draw_text(
-            target,
-            Point::new(0, y),
-            "WARNING: a new LXMF address",
-            theme.danger,
-            theme,
-        )
-        .ok();
-        y += theme.line_h;
-        widgets::draw_text(
-            target,
-            Point::new(0, y),
-            "means peers must rediscover you.",
-            theme.danger,
-            theme,
-        )
-        .ok();
         y += theme.line_h;
 
         if !ctx.notice.is_empty() {

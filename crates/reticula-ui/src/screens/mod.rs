@@ -7,6 +7,7 @@ pub mod new_chat;
 pub mod nomad_list;
 pub mod nomad_view;
 pub mod settings;
+pub mod settings_data;
 pub mod settings_identity;
 pub mod settings_lora;
 pub mod settings_wifi;
@@ -27,6 +28,7 @@ use new_chat::NewChatScreen;
 use nomad_list::NomadListScreen;
 use nomad_view::NomadViewScreen;
 use settings::SettingsScreen;
+use settings_data::SettingsDataScreen;
 use settings_identity::SettingsIdentityScreen;
 use settings_lora::SettingsLoraScreen;
 use settings_wifi::SettingsWifiScreen;
@@ -41,6 +43,7 @@ pub enum Screen {
     NomadList(NomadListScreen),
     NomadView(NomadViewScreen),
     Settings(SettingsScreen),
+    SettingsData(SettingsDataScreen),
     SettingsIdentity(SettingsIdentityScreen),
     SettingsWifi(SettingsWifiScreen),
     SettingsLora(SettingsLoraScreen),
@@ -56,6 +59,7 @@ impl Screen {
             Screen::NomadList(_) => ScreenId::NomadList,
             Screen::NomadView(_) => ScreenId::NomadView,
             Screen::Settings(_) => ScreenId::Settings,
+            Screen::SettingsData(_) => ScreenId::SettingsData,
             Screen::SettingsIdentity(_) => ScreenId::SettingsIdentity,
             Screen::SettingsWifi(_) => ScreenId::SettingsWifi,
             Screen::SettingsLora(_) => ScreenId::SettingsLora,
@@ -71,6 +75,7 @@ impl Screen {
             Screen::NomadList(s) => s.handle_key(key),
             Screen::NomadView(s) => s.handle_key(key),
             Screen::Settings(s) => s.handle_key(key),
+            Screen::SettingsData(s) => s.handle_key(key),
             Screen::SettingsIdentity(s) => s.handle_key(key),
             Screen::SettingsWifi(s) => s.handle_key(key),
             Screen::SettingsLora(s) => s.handle_key(key),
@@ -90,6 +95,7 @@ impl Screen {
             Screen::NomadList(s) => s.render(target, ctx, theme),
             Screen::NomadView(s) => s.render(target, ctx, theme),
             Screen::Settings(s) => s.render(target, ctx, theme),
+            Screen::SettingsData(s) => s.render(target, ctx, theme),
             Screen::SettingsIdentity(s) => s.render(target, ctx, theme),
             Screen::SettingsWifi(s) => s.render(target, ctx, theme),
             Screen::SettingsLora(s) => s.render(target, ctx, theme),

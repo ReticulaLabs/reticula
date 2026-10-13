@@ -37,6 +37,11 @@ embedded-svc = "0.28"
 log = "0.4"
 
 [patch.crates-io]
+# Point every crate in the graph (firmware, reticula-app, reticula-tdeck) at
+# the local reticulum-sdk checkout so there is a single copy of the SDK and its
+# types (LoRaHwProvider, LoRaConfig, ...) line up. This is a local override,
+# not a vendored copy — the SDK lives in the sibling `reticulum-sdk` repo.
+#reticulum-sdk = { path = "../../reticulum-sdk" }
 # embuild pins bindgen 0.71.1, which produces broken bindings with modern
 # clang (>= 21); the fork bumps it to 0.72.
 embuild = { path = "../third_party/embuild" }

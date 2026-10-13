@@ -19,7 +19,7 @@ pub struct HomeScreen {
 }
 
 impl HomeScreen {
-    const ITEMS: [&'static str; 3] = ["LXMF Chat", "NomadNet", "Settings"];
+    const ITEMS: [&'static str; 4] = ["LXMF Chat", "NomadNet", "Identity", "Settings"];
 
     pub fn new() -> Self {
         Self { state: ListState::default() }
@@ -38,6 +38,7 @@ impl HomeScreen {
             KeyCode::Enter => match self.state.selected {
                 0 => Command::ShowScreen(ScreenId::ChatList),
                 1 => Command::ShowScreen(ScreenId::NomadList),
+                2 => Command::ShowScreen(ScreenId::SettingsIdentity),
                 _ => Command::ShowScreen(ScreenId::Settings),
             },
             KeyCode::Esc => Command::Back,

@@ -1,4 +1,4 @@
-//! Settings menu: sub-menus for identity and WiFi, plus a few actions.
+//! Settings menu: sub-menus for WiFi, LoRa, and data management.
 
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::geometry::Point;
@@ -19,7 +19,7 @@ pub struct SettingsScreen {
 }
 
 impl SettingsScreen {
-    const ITEMS: [&'static str; 4] = ["Identity", "WiFi", "LoRa", "Re-announce identities"];
+    const ITEMS: [&'static str; 3] = ["WiFi", "LoRa", "Data Management"];
 
     pub fn new() -> Self {
         Self { state: ListState::default() }
@@ -36,10 +36,9 @@ impl SettingsScreen {
                 Command::None
             }
             KeyCode::Enter => match self.state.selected {
-                0 => Command::ShowScreen(ScreenId::SettingsIdentity),
-                1 => Command::ShowScreen(ScreenId::SettingsWifi),
-                2 => Command::ShowScreen(ScreenId::SettingsLora),
-                _ => Command::Announce,
+                0 => Command::ShowScreen(ScreenId::SettingsWifi),
+                1 => Command::ShowScreen(ScreenId::SettingsLora),
+                _ => Command::ShowScreen(ScreenId::SettingsData),
             },
             KeyCode::Esc => Command::Back,
             _ => Command::None,
