@@ -353,7 +353,7 @@ where
 /// Side length of a root-menu icon's square bounding box, in pixels.
 pub const MENU_ICON: i32 = 24;
 
-/// A section icon shown beside an entry on the root menu.
+/// A section icon shown beside an entry on a menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuIcon {
     /// LXMF chat: a speech bubble.
@@ -364,6 +364,12 @@ pub enum MenuIcon {
     Identity,
     /// Settings: a gear.
     Settings,
+    /// WiFi: a signal fan.
+    Wifi,
+    /// LoRa: a radio mast.
+    Lora,
+    /// Data management: a database.
+    Data,
 }
 
 /// Draw the [`MenuIcon`] `icon` with its `MENU_ICON`×`MENU_ICON` bounding box
@@ -382,6 +388,9 @@ where
         MenuIcon::Nomad => draw_nomad_icon(target, at, color),
         MenuIcon::Identity => draw_identity_icon(target, at, color),
         MenuIcon::Settings => draw_settings_icon(target, at, color),
+        MenuIcon::Wifi => draw_wifi_menu_icon(target, at, color),
+        MenuIcon::Lora => draw_lora_menu_icon(target, at, color),
+        MenuIcon::Data => draw_data_menu_icon(target, at, color),
     }
 }
 
@@ -478,6 +487,96 @@ where
     // Rim and hub.
     Circle::new(c - Point::new(7, 7), 14).into_styled(stroke).draw(target)?;
     Circle::new(c - Point::new(2, 2), 4).into_styled(stroke).draw(target)?;
+    Ok(())
+}
+
+/// A signal fan (dot plus radiating arcs), for the WiFi section.
+fn draw_wifi_menu_icon<D>(target: &mut D, at: Point, color: Rgb565) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let stroke = PrimitiveStyle::with_stroke(color, 1);
+    let base = at + Point::new(12, 18);
+    // Base dot.
+    Circle::new(base - Point::new(1, 1), 2)
+        .into_styled(PrimitiveStyle::with_fill(color))
+        .draw(target)?;
+    // Radiating arcs, outermost last.
+    for r in [4i32, 7, 10] {
+        let d = (r * 2) as u32;
+        Arc::new(
+            base - Point::new(r, r),
+            d,
+            Angle::from_degrees(180.0),
+            Angle::from_degrees(180.0),
+        )
+        .into_styled(stroke)
+        .draw(target)?;
+    }
+    Ok(())
+}
+
+/// A radio mast with a tip and emanating waves, for the LoRa section.
+fn draw_lora_menu_icon<D>(target: &mut D, at: Point, color: Rgb565) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let stroke = PrimitiveStyle::with_stroke(color, 1);
+    // Mast.
+    Line::new(at + Point::new(12, 21), at + Point::new(12, 8))
+        .into_styled(stroke)
+        .draw(target)?;
+    // Tip ball.
+    Circle::new(at + Point::new(11, 7), 2)
+        .into_styled(PrimitiveStyle::with_fill(color))
+        .draw(target)?;
+    // Waves arcing outward on either side of the tip.
+    for r in [5i32, 8] {
+        let d = (r * 2) as u32;
+        let top_left = at + Point::new(12 - r, 8 - r);
+        Arc::new(top_left, d, Angle::from_degrees(135.0), Angle::from_degrees(90.0))
+            .into_styled(stroke)
+            .draw(target)?;
+        Arc::new(top_left, d, Angle::from_degrees(315.0), Angle::from_degrees(90.0))
+            .into_styled(stroke)
+            .draw(target)?;
+    }
+    Ok(())
+}
+
+/// A database (a top disc plus stacked front curves), for the data section.
+fn draw_data_menu_icon<D>(target: &mut D, at: Point, color: Rgb565) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let stroke = PrimitiveStyle::with_stroke(color, 1);
+    // Top disc.
+    Ellipse::new(at + Point::new(4, 4), Size::new(16, 6))
+        .into_styled(stroke)
+        .draw(target)?;
+    // Sides joining the discs.
+    Line::new(at + Point::new(4, 7), at + Point::new(4, 17))
+        .into_styled(stroke)
+        .draw(target)?;
+    Line::new(at + Point::new(20, 7), at + Point::new(20, 17))
+        .into_styled(stroke)
+        .draw(target)?;
+    // Shallow "U" front curves for the two dividers and the base.
+    let fronts = [
+        [(4, 10), (7, 12), (12, 13), (17, 12), (20, 10)],
+        [(4, 14), (7, 16), (12, 17), (17, 16), (20, 14)],
+        [(4, 17), (7, 19), (12, 20), (17, 19), (20, 17)],
+    ];
+    for pts in fronts {
+        for w in pts.windows(2) {
+            Line::new(
+                at + Point::new(w[0].0, w[0].1),
+                at + Point::new(w[1].0, w[1].1),
+            )
+            .into_styled(stroke)
+            .draw(target)?;
+        }
+    }
     Ok(())
 }
 
