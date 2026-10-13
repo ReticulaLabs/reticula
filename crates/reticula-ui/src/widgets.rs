@@ -5,7 +5,9 @@ use embedded_graphics::geometry::{Angle, Point, Size};
 use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{Arc, Circle, Line, PrimitiveStyle, Rectangle};
+use embedded_graphics::primitives::{
+    Arc, Circle, Ellipse, Line, PrimitiveStyle, Rectangle, RoundedRectangle, Triangle,
+};
 use embedded_graphics::text::{Baseline, Text};
 
 use crate::context::NetworkState;
@@ -345,6 +347,137 @@ where
             .into_styled(stroke)
             .draw(target)?;
     }
+    Ok(())
+}
+
+/// Side length of a root-menu icon's square bounding box, in pixels.
+pub const MENU_ICON: i32 = 24;
+
+/// A section icon shown beside an entry on the root menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuIcon {
+    /// LXMF chat: a speech bubble.
+    Chat,
+    /// NomadNet: a globe.
+    Nomad,
+    /// Identity: a person.
+    Identity,
+    /// Settings: a gear.
+    Settings,
+}
+
+/// Draw the [`MenuIcon`] `icon` with its `MENU_ICON`×`MENU_ICON` bounding box
+/// at `at` (top-left), stroked/filled in `color`.
+pub fn draw_menu_icon<D>(
+    target: &mut D,
+    icon: MenuIcon,
+    at: Point,
+    color: Rgb565,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    match icon {
+        MenuIcon::Chat => draw_chat_icon(target, at, color),
+        MenuIcon::Nomad => draw_nomad_icon(target, at, color),
+        MenuIcon::Identity => draw_identity_icon(target, at, color),
+        MenuIcon::Settings => draw_settings_icon(target, at, color),
+    }
+}
+
+/// A speech bubble with a tail and three dots, for the chat section.
+fn draw_chat_icon<D>(target: &mut D, at: Point, color: Rgb565) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let stroke = PrimitiveStyle::with_stroke(color, 1);
+    // Bubble body (rounded rectangle).
+    RoundedRectangle::with_equal_corners(
+        Rectangle::new(at + Point::new(2, 3), px(20, 14)),
+        Size::new(3, 3),
+    )
+    .into_styled(stroke)
+    .draw(target)?;
+    // Tail, filled so it reads as part of the bubble.
+    Triangle::new(
+        at + Point::new(6, 16),
+        at + Point::new(6, 22),
+        at + Point::new(13, 16),
+    )
+    .into_styled(PrimitiveStyle::with_fill(color))
+    .draw(target)?;
+    // Three "typing" dots inside the bubble.
+    for dx in [8, 12, 16] {
+        Circle::new(at + Point::new(dx - 1, 9), 2)
+            .into_styled(PrimitiveStyle::with_fill(color))
+            .draw(target)?;
+    }
+    Ok(())
+}
+
+/// A globe (sphere plus meridian and equator), for the NomadNet section.
+fn draw_nomad_icon<D>(target: &mut D, at: Point, color: Rgb565) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let stroke = PrimitiveStyle::with_stroke(color, 1);
+    // Outer sphere.
+    Circle::new(at + Point::new(3, 3), 18).into_styled(stroke).draw(target)?;
+    // Vertical meridian.
+    Ellipse::new(at + Point::new(8, 3), Size::new(8, 18))
+        .into_styled(stroke)
+        .draw(target)?;
+    // Equator.
+    Line::new(at + Point::new(3, 12), at + Point::new(21, 12))
+        .into_styled(stroke)
+        .draw(target)?;
+    Ok(())
+}
+
+/// A head-and-shoulders figure, for the identity section.
+fn draw_identity_icon<D>(target: &mut D, at: Point, color: Rgb565) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let stroke = PrimitiveStyle::with_stroke(color, 1);
+    // Head.
+    Circle::new(at + Point::new(8, 3), 8).into_styled(stroke).draw(target)?;
+    // Shoulders: the upper half of a circle.
+    Arc::new(
+        at + Point::new(3, 12),
+        18,
+        Angle::from_degrees(180.0),
+        Angle::from_degrees(180.0),
+    )
+    .into_styled(stroke)
+    .draw(target)?;
+    Ok(())
+}
+
+/// A gear (ring with eight teeth and a hub), for the settings section.
+fn draw_settings_icon<D>(target: &mut D, at: Point, color: Rgb565) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let stroke = PrimitiveStyle::with_stroke(color, 1);
+    let c = at + Point::new(12, 12);
+    // Eight short teeth radiating from the rim.
+    let teeth = [
+        (Point::new(0, -6), Point::new(0, -9)),
+        (Point::new(0, 6), Point::new(0, 9)),
+        (Point::new(6, 0), Point::new(9, 0)),
+        (Point::new(-6, 0), Point::new(-9, 0)),
+        (Point::new(4, -4), Point::new(6, -6)),
+        (Point::new(-4, -4), Point::new(-6, -6)),
+        (Point::new(4, 4), Point::new(6, 6)),
+        (Point::new(-4, 4), Point::new(-6, 6)),
+    ];
+    for (a, b) in teeth {
+        Line::new(c + a, c + b).into_styled(stroke).draw(target)?;
+    }
+    // Rim and hub.
+    Circle::new(c - Point::new(7, 7), 14).into_styled(stroke).draw(target)?;
+    Circle::new(c - Point::new(2, 2), 4).into_styled(stroke).draw(target)?;
     Ok(())
 }
 

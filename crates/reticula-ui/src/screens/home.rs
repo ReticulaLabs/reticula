@@ -1,4 +1,8 @@
-//! Home / main menu screen.
+//! Home / root menu screen.
+//!
+//! The root menu is rendered as a list of full-width rows, each roughly a
+//! sixth of the screen tall, with a section icon on the left and the section
+//! name (plus a short description) beside it.
 
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::geometry::Point;
@@ -13,13 +17,44 @@ use crate::screens::ListState;
 use crate::theme::Theme;
 use crate::widgets::{self, px};
 
+/// One entry on the root menu.
+struct MenuItem {
+    /// Section name, shown next to the icon.
+    title: &'static str,
+    /// Short description shown beneath the name.
+    subtitle: &'static str,
+    /// Icon shown on the left of the row.
+    icon: widgets::MenuIcon,
+}
+
 #[derive(Default)]
 pub struct HomeScreen {
     pub state: ListState,
 }
 
 impl HomeScreen {
-    const ITEMS: [&'static str; 4] = ["LXMF Chat", "NomadNet", "Identity", "Settings"];
+    const ITEMS: [MenuItem; 4] = [
+        MenuItem {
+            title: "LXMF Chat",
+            subtitle: "Send and receive messages",
+            icon: widgets::MenuIcon::Chat,
+        },
+        MenuItem {
+            title: "NomadNet",
+            subtitle: "Browse mesh pages",
+            icon: widgets::MenuIcon::Nomad,
+        },
+        MenuItem {
+            title: "Identity",
+            subtitle: "Keys and address",
+            icon: widgets::MenuIcon::Identity,
+        },
+        MenuItem {
+            title: "Settings",
+            subtitle: "WiFi, radio and data",
+            icon: widgets::MenuIcon::Settings,
+        },
+    ];
 
     pub fn new() -> Self {
         Self { state: ListState::default() }
@@ -56,59 +91,101 @@ impl HomeScreen {
 
         widgets::draw_header(target, width, "RETICULA", "", &ctx.network, theme).ok();
 
-        let body_top = theme.line_h;
-        let mut y = body_top;
-
-        // Device/identity status line.
+        // Device/identity status band directly under the header.
         let name = if ctx.display_name.is_empty() {
             "unnamed".to_string()
         } else {
             ctx.display_name.to_string()
         };
         let status_line = format!(
-            "{}  |  {} link{}  |  up {}s",
+            "{}   {} link{}   up {}s",
             name,
             ctx.network.peer_links,
             if ctx.network.peer_links == 1 { "" } else { "s" },
             ctx.network.uptime_ms / 1000,
         );
-        widgets::draw_text(target, Point::new(0, y), &status_line, theme.text_dim, theme).ok();
-        y += theme.line_h;
+        let status_line = widgets::truncate(&status_line, theme.chars_per_line(width - 6));
+        widgets::draw_text(
+            target,
+            Point::new(6, theme.line_h),
+            &status_line,
+            theme.text_dim,
+            theme,
+        )
+        .ok();
         widgets::fill_rect(
             target,
-            Rectangle::new(Point::new(0, y), px(width, 1)),
+            Rectangle::new(Point::new(0, theme.line_h * 2), px(width, 1)),
             theme.border,
         )
         .ok();
-        y += 2;
 
-        let visible = theme.lines_fit(height - y - theme.line_h);
-        self.state.keep_visible(visible);
+        // Each row is about a sixth of the screen tall and spans the full
+        // width.
+        let row_h = (height / 6).max(theme.line_h + 8);
+        let rows_total = row_h * Self::ITEMS.len() as i32;
+        let list_top = theme.line_h * 2 + 1;
+        let list_bottom = height - theme.line_h;
+        let list_h = (list_bottom - list_top).max(0);
+        // Centre the rows, snapped to the text grid so labels stay crisp on
+        // the low-resolution LCD (and readable in the terminal simulator).
+        let mut y = list_top + ((list_h - rows_total).max(0) / 2);
+        y -= y % theme.line_h;
 
         for (i, item) in Self::ITEMS.iter().enumerate() {
-            if i < self.state.scroll {
-                continue;
-            }
-            if i >= self.state.scroll + visible {
-                break;
-            }
-            let label = format!("{}. {item}", i + 1);
-            let row = Point::new(0, y);
-            if i == self.state.selected {
-                widgets::draw_highlight(
+            let selected = i == self.state.selected;
+            let row = Rectangle::new(Point::new(0, y), px(width, row_h));
+
+            if selected {
+                widgets::fill_rect(target, row, theme.selection).ok();
+                // Left accent bar marks the active row.
+                widgets::fill_rect(
                     target,
-                    row,
-                    &label,
-                    width,
-                    theme.selection,
-                    theme.selection_text,
-                    theme,
+                    Rectangle::new(Point::new(0, y), px(3, row_h)),
+                    theme.accent,
                 )
                 .ok();
-            } else {
-                widgets::draw_text(target, row, &label, theme.text, theme).ok();
             }
-            y += theme.line_h;
+
+            // A hairline divider between rows, but not below the last one.
+            if i + 1 < Self::ITEMS.len() {
+                widgets::fill_rect(
+                    target,
+                    Rectangle::new(Point::new(0, y + row_h - 1), px(width, 1)),
+                    theme.border,
+                )
+                .ok();
+            }
+
+            // Icon, vertically centred in the row.
+            let icon_x = 12;
+            let icon_y = y + (row_h - widgets::MENU_ICON) / 2;
+            let icon_color = if selected { theme.selection_text } else { theme.accent };
+            widgets::draw_menu_icon(target, item.icon, Point::new(icon_x, icon_y), icon_color)
+                .ok();
+
+            // Title and description, to the right of the icon.
+            let text_x = 48;
+            let title_color = if selected { theme.selection_text } else { theme.text };
+            let sub_color = if selected { theme.selection_text } else { theme.text_dim };
+            widgets::draw_text(
+                target,
+                Point::new(text_x, y + theme.line_h),
+                item.title,
+                title_color,
+                theme,
+            )
+            .ok();
+            widgets::draw_text(
+                target,
+                Point::new(text_x, y + theme.line_h * 2),
+                item.subtitle,
+                sub_color,
+                theme,
+            )
+            .ok();
+
+            y += row_h;
         }
 
         let footer = Rectangle::new(
