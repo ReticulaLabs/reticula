@@ -12,6 +12,9 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+mod clock;
+mod gps;
+
 use core::convert::TryInto;
 use std::time::Duration;
 
@@ -97,10 +100,31 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let Peripherals {
         spi2,
         i2c0,
+        uart1,
         modem,
         pins,
         ..
     } = Peripherals::take().map_err(|e| format!("Peripherals::take: {e}"))?;
+
+    // GNSS pins are taken before `pins` is handed to the board, so that each
+    // peripheral is claimed exactly once.
+    let gnss = gps::open(
+        uart1,
+        // SAFETY: `Peripherals::take()` gave us sole ownership of every
+        // peripheral, and GPIO43/44 are wired to the GNSS and used nowhere
+        // else. The board does not touch these two.
+        unsafe { esp_idf_hal::gpio::Gpio43::new() },
+        unsafe { esp_idf_hal::gpio::Gpio44::new() },
+    );
+
+    // Wall-clock recovery runs on its own task, so the rest of the boot is not
+    // held up waiting for a GNSS fix (which can take minutes) or an SNTP
+    // response. Whichever source lands first wins; see `clock` for why an
+    // unclocked node cannot appear on the network at all.
+    if let Some(gnss) = gnss {
+        std::thread::spawn(move || gps::spawn(gnss));
+    }
+    clock::log_status("startup");
 
     // WiFi (best-effort; the device still runs offline unless disabled). The
     // handle is attached to the board so the UI can report link status/RSSI.
@@ -111,6 +135,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         match connect_wifi(modem, nvs.clone()) {
             Ok(wifi) => {
                 log::info!("WiFi connected");
+                clock::start_sntp();
                 Some(wifi)
             }
             Err(e) => {
