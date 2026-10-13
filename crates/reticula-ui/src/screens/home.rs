@@ -121,16 +121,11 @@ impl HomeScreen {
         .ok();
 
         // Each row is about a sixth of the screen tall and spans the full
-        // width.
+        // width. The whole group is top-aligned just under the status band,
+        // starting on the text grid so labels stay crisp on the low-resolution
+        // LCD (and readable in the terminal simulator).
         let row_h = (height / 6).max(theme.line_h + 8);
-        let rows_total = row_h * Self::ITEMS.len() as i32;
-        let list_top = theme.line_h * 2 + 1;
-        let list_bottom = height - theme.line_h;
-        let list_h = (list_bottom - list_top).max(0);
-        // Centre the rows, snapped to the text grid so labels stay crisp on
-        // the low-resolution LCD (and readable in the terminal simulator).
-        let mut y = list_top + ((list_h - rows_total).max(0) / 2);
-        y -= y % theme.line_h;
+        let mut y = theme.line_h * 2;
 
         for (i, item) in Self::ITEMS.iter().enumerate() {
             let selected = i == self.state.selected;
