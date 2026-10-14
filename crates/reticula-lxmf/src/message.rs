@@ -44,15 +44,24 @@ pub const HASH_LENGTH: usize = 32;
 /// So an acknowledgement here means "the peer's delivery destination took
 /// delivery of these bytes", and nothing more.
 ///
-/// In particular a message can be acknowledged and still be discarded by the
-/// peer: unparseable, a duplicate, on an ignore list, or simply dropped by an
-/// application that registered no delivery callback.
+/// Acknowledgement is also not reliable across implementations: the reference
+/// hashes the packet as it arrived on the wire while the SDK hashes the packet
+/// as it was built, so a peer's proof frequently cannot be matched to the
+/// message that caused it. [`Delivery::Sent`] therefore exists as the ordinary
+/// resting state for an outgoing message, and the absence of a proof is not
+/// evidence that anything went wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
-    /// Handed to the transport; the peer's acknowledgement has not arrived.
+    /// Written to the transport; waiting to see whether it is acknowledged.
     Pending,
+    /// Written to the transport. No acknowledgement arrived, which may simply
+    /// mean the peer's proofs cannot be correlated with ours.
+    Sent,
     /// The peer's link layer returned a proof for the packet.
     Acknowledged,
+    /// Delivery was given up on: the transport reported an error (a link that
+    /// closed or was lost, or no route to the peer at all).
+    Failed,
 }
 
 /// An LXMF message.

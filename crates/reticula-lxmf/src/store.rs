@@ -75,6 +75,13 @@ impl MessageStore {
         indexes.iter().filter_map(|&i| self.messages.get(i).cloned()).collect()
     }
 
+    /// The delivery state of a stored message, by message hash.
+    ///
+    /// `None` when no such message is held (it was evicted, or never stored).
+    pub fn delivery_of(&self, message_hash: [u8; 32]) -> Option<Delivery> {
+        self.messages.iter().find(|m| m.hash == message_hash).map(|m| m.delivery)
+    }
+
     /// Update the delivery state of a stored message, by message hash.
     ///
     /// Returns `true` if a matching message was found *and* its state actually
@@ -183,6 +190,52 @@ mod tests {
         let mut message = LxmfMessage::new([7u8; 16], [9u8; 16], "", content);
         message.pack(&identity).expect("packing a message must succeed");
         message
+    }
+
+    #[test]
+    fn delivery_of_reports_the_current_state() {
+        let mut store = MessageStore::new(100);
+        let message = sent_msg("hello");
+        let hash = message.hash;
+        store.push(message, Direction::Outbound);
+
+        assert_eq!(store.delivery_of(hash), Some(Delivery::Pending));
+        store.set_delivery(hash, Delivery::Acknowledged);
+        assert_eq!(store.delivery_of(hash), Some(Delivery::Acknowledged));
+    }
+
+    #[test]
+    fn an_unproven_message_settles_on_sent() {
+        // Acknowledgements do not interoperate, so "written but never proven"
+        // is the ordinary resting state, not a pending one that lingers.
+        let mut store = MessageStore::new(100);
+        let message = sent_msg("hello");
+        let hash = message.hash;
+        store.push(message, Direction::Outbound);
+
+        assert!(store.set_delivery(hash, Delivery::Sent));
+        assert_eq!(store.delivery_of(hash), Some(Delivery::Sent));
+        assert_ne!(Delivery::Sent, Delivery::Pending);
+    }
+
+    #[test]
+    fn a_failed_message_is_no_longer_pending() {
+        // A message delivery was given up on must stop reading as "still
+        // sending", which is what the warning colour keys off.
+        let mut store = MessageStore::new(100);
+        let message = sent_msg("hello");
+        let hash = message.hash;
+        store.push(message, Direction::Outbound);
+
+        assert_eq!(store.delivery_of(hash), Some(Delivery::Pending));
+        assert!(store.set_delivery(hash, Delivery::Failed));
+        assert_eq!(store.delivery_of(hash), Some(Delivery::Failed));
+    }
+
+    #[test]
+    fn delivery_of_is_none_for_an_unknown_message() {
+        let store = MessageStore::new(100);
+        assert_eq!(store.delivery_of([0xAAu8; 32]), None);
     }
 
     #[test]

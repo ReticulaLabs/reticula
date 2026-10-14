@@ -820,6 +820,10 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
             .iter()
             .map(|m| ChatMessage {
                 incoming: m.incoming,
+                // Amber only while the message is genuinely in flight. A message that
+                // was written to the transport but never acknowledged settles on
+                // `Sent`, because acknowledgements do not interoperate and an
+                // unproven message is not evidence of a problem.
                 unacknowledged: !m.incoming && m.delivery == Delivery::Pending,
                 title: m.title_string(),
                 content: m.content_string(),

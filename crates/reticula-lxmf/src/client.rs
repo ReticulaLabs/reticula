@@ -12,7 +12,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, Mutex};
 use tokio::time::{timeout, Duration};
 
-use reticulum_sdk::destination::link::{LinkEvent, LinkEventData, LinkId, LinkStatus};
+use reticulum_sdk::destination::link::{Link, LinkEvent, LinkEventData, LinkId, LinkStatus};
 use reticulum_sdk::destination::{DestinationName, SingleInputDestination};
 use reticulum_sdk::hash::{AddressHash, Hash};
 use reticulum_sdk::identity::{HashIdentity, PrivateIdentity};
@@ -50,6 +50,15 @@ pub const PATH_REDISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 pub const SEND_ATTEMPTS: usize = 3;
 /// Pause between send attempts.
 pub const SEND_RETRY_DELAY: Duration = Duration::from_secs(5);
+/// How long to wait for the peer's acknowledgement before treating the link
+/// that carried the message as having silently lost it.
+///
+/// This is what makes "the transport accepted the bytes" mean something: a
+/// packet written to a link whose far end has gone away produces no error, so
+/// the acknowledgement is the only signal that the message actually crossed.
+pub const ACK_TIMEOUT: Duration = Duration::from_secs(12);
+/// How often the acknowledgement is polled while waiting.
+const ACK_POLL: Duration = Duration::from_millis(100);
 /// How long a sent message is tracked waiting for its delivery proof before
 /// the pending entry is discarded.
 ///
@@ -143,6 +152,16 @@ pub struct LxmfClient {
     events: broadcast::Sender<LxmfEvent>,
     /// Outbound links we established per peer, keyed by peer address hash.
     links: Mutex<HashMap<AddressHash, LinkId>>,
+    /// In-links a peer opened to *our* delivery destination, keyed by that
+    /// peer's own address hash (learned from the messages it sends).
+    ///
+    /// These are the "backchannel" links the reference LXMF router keeps: a
+    /// peer that can reach us has necessarily proved it holds a route to us,
+    /// but it need never have announced its own delivery destination to us. On
+    /// a link such as LoRa, where announces frequently do not propagate, that
+    /// is the normal case — replying over the link the peer already opened is
+    /// then the only way back.
+    in_links: Mutex<HashMap<AddressHash, LinkId>>,
     /// The interface each peer was last seen reachable over, keyed by peer
     /// address hash. Populated from the interface id carried on link events,
     /// together with the link the observation came from, so the mapping can be
@@ -188,6 +207,7 @@ impl LxmfClient {
             store,
             events,
             links: Mutex::new(HashMap::new()),
+            in_links: Mutex::new(HashMap::new()),
             peer_ifaces: std::sync::Mutex::new(HashMap::new()),
             discovered: Mutex::new(Vec::new()),
             pending_proofs: Mutex::new(HashMap::new()),
@@ -301,12 +321,19 @@ impl LxmfClient {
 
     /// Send a message to a peer by LXMF address hash.
     ///
-    /// Establishes (or reuses) a direct link to the recipient and transmits
-    /// the packed message over it. Returns the message hash on success.
+    /// Transmits over a direct link to the recipient — one we established
+    /// earlier, one the peer opened to us, or a freshly established one.
+    /// Returns the message hash once the peer has **acknowledged** it; see
+    /// [`Delivery::Acknowledged`] for exactly what that does and does not
+    /// prove.
     ///
-    /// The transfer is retried [`SEND_ATTEMPTS`] times, each attempt from a
-    /// fresh link, so a link that lost its proof or a path that expired
-    /// mid-flight does not silently swallow the message.
+    /// The peer acknowledges each message it accepts over a link, and that
+    /// acknowledgement clears the message's pending state. It is advisory, not
+    /// a delivery guarantee, and it is not treated as one: proof matching does
+    /// not reliably interoperate with the reference implementation, so the
+    /// absence of a proof never causes a retry or a failure. Only a genuine
+    /// transport error (a link that closed or was lost, or no route at all)
+    /// retries, up to [`SEND_ATTEMPTS`] times.
     pub async fn send(
         &self,
         destination_hash: [u8; 16],
@@ -327,22 +354,45 @@ impl LxmfClient {
         let hash = message.hash;
         let peer = AddressHash::new(destination_hash);
 
+        // Store the message once, before any transmission attempt. Every
+        // attempt re-sends *this* message, so pushing inside the loop would
+        // show the user one copy of their message per retry — and because the
+        // copies share a hash, only one of them would ever be updated when
+        // the delivery state changed, leaving the rest stuck as pending.
+        let stored = self.store.lock().unwrap().push(message, Direction::Outbound);
+        let _ = self.events.send(LxmfEvent::MessageSent(stored));
+
         let mut last_error = None;
         for attempt in 1..=SEND_ATTEMPTS {
             match self.send_packed(destination_hash, packed.clone()).await {
                 Ok(packet_hash) => {
-                    let stored = self.store.lock().unwrap().push(message, Direction::Outbound);
                     self.track_pending_proof(packet_hash, hash).await;
-                    let _ = self.events.send(LxmfEvent::MessageSent(stored));
+
+                    if self.await_acknowledgement(hash).await {
+                        return Ok(hash);
+                    }
+
+                    // The message was written to an established link and the link
+                    // did not report an error, so it was sent.
+                    //
+                    // A missing acknowledgement is deliberately *not* treated
+                    // as failure. Proof matching does not interoperate with
+                    // the reference implementation, and a peer that does
+                    // acknowledge can have the proof delayed well past any
+                    // timeout on a slow interface. Retrying on that basis
+                    // would multiply deliveries and report failure for
+                    // messages that actually arrived.
+                    self.store.lock().unwrap().set_delivery(hash, Delivery::Sent);
+                    info!("lxmf: sent to {peer}, no acknowledgement seen");
                     return Ok(hash);
                 }
                 Err(e) => {
                     warn!("lxmf: send to {peer} failed (attempt {attempt}/{SEND_ATTEMPTS}): {e}");
                     last_error = Some(e);
-                    // The cached link for this peer is suspect (closed, stale,
-                    // or never established); drop it so the next attempt
-                    // builds a fresh one instead of waiting on a dead link.
-                    self.links.lock().await.remove(&peer);
+                    // The link for this peer is suspect (closed, stale, or
+                    // never established); drop it so the next attempt builds a
+                    // fresh one instead of waiting on a dead link.
+                    self.drop_links_to(peer).await;
                     if attempt < SEND_ATTEMPTS {
                         tokio::time::sleep(SEND_RETRY_DELAY).await;
                     }
@@ -351,7 +401,34 @@ impl LxmfClient {
         }
 
         info!("lxmf: giving up sending to {peer} after {SEND_ATTEMPTS} attempts");
+        // A message we have given up on must stop reading as "still sending".
+        self.store.lock().unwrap().set_delivery(hash, Delivery::Failed);
         Err(last_error.expect("at least one attempt was made"))
+    }
+
+    /// Wait for the peer's acknowledgement of `message_hash`.
+    ///
+    /// Returns `true` once it arrives. A link that silently dropped the packet
+    /// produces no error elsewhere in the stack, so this is the only way to
+    /// find out that it did.
+    async fn await_acknowledgement(&self, message_hash: [u8; 32]) -> bool {
+        let deadline = Instant::now() + ACK_TIMEOUT;
+        loop {
+            let state = self.store.lock().unwrap().delivery_of(message_hash);
+            if state == Some(Delivery::Acknowledged) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(ACK_POLL).await;
+        }
+    }
+
+    /// Forget every cached link to `peer`, so the next send re-establishes one.
+    async fn drop_links_to(&self, peer: AddressHash) {
+        self.links.lock().await.remove(&peer);
+        self.in_links.lock().await.remove(&peer);
     }
 
     /// The long-running event loop. Spawn this on the tokio runtime.
@@ -415,15 +492,13 @@ impl LxmfClient {
                 // `match`, so locking the link again inside an arm would
                 // deadlock on the link's own mutex and wedge every task that
                 // needs that link.
-                let status = match transport.find_out_link(&link_id).await {
+                let status = match Self::find_any_link(&transport, &link_id).await {
                     Some(link) => link.lock().await.status(),
                     None => return Err(LxmfError::LinkLost),
                 };
                 match status {
                     LinkStatus::Active => {
-                        let link = transport
-                            .find_out_link(&link_id)
-                            .await
+                        let link = Self::find_any_link(&transport, &link_id).await
                             .ok_or(LxmfError::LinkLost)?;
                         let packet = link.lock().await.data_packet(&packed)?;
                         let packet_hash = packet.hash();
@@ -481,6 +556,32 @@ impl LxmfClient {
             debug!("lxmf: cached link {link_id} to {peer} is dead, re-establishing");
         }
 
+        // A peer that has opened a link to our delivery destination has proved it
+        // holds a route to us, and that link is a way back to it.
+        //
+        // It is a *last* resort, though. A receiver only installs its delivery
+        // callback on links it did not initiate: the reference router wires an
+        // out-link's established-callback to its own bookkeeping, not to the
+        // handler that installs the packet callback, and that handler only
+        // ever fires on the responder side. Data written to a link the peer
+        // opened can therefore be dropped in silence — no error, no proof —
+        // which looks exactly like a lost packet and is impossible to tell
+        // apart from one.
+        //
+        // So: always prefer establishing our own link when we know where the
+        // peer is, and only fall back to its link when we have no route at all.
+        if self.transport.get_out_destination(&peer).await.is_none() {
+            let backchannel = { self.in_links.lock().await.get(&peer).copied() };
+            if let Some(link_id) = backchannel {
+                if self.link_is_active(&link_id).await {
+                    debug!("lxmf: no known destination for {peer}, replying over peer-initiated link {link_id}");
+                    return Ok(link_id);
+                }
+                self.in_links.lock().await.remove(&peer);
+                debug!("lxmf: peer-initiated link {link_id} from {peer} is dead");
+            }
+        }
+
         // The transport prunes its destination cache aggressively on embedded
         // targets (120s without a re-announce), so a destination we saw
         // earlier can be gone by the time the user sends. When that happens,
@@ -522,12 +623,37 @@ impl LxmfClient {
         Ok(link_id)
     }
 
-    /// True if the outbound link with `link_id` exists and is not closed.
+    /// Resolve a link id to its transport link, whether it was opened by us or by
+    /// the peer.
+///
+/// Replies may travel over a link the peer opened to us, so every lookup has
+    /// to consider both tables rather than just the out-link one.
+    async fn find_any_link(
+        transport: &Transport,
+        link_id: &LinkId,
+    ) -> Option<Arc<tokio::sync::Mutex<Link>>> {
+        match transport.find_out_link(link_id).await {
+            Some(link) => Some(link),
+            None => transport.find_in_link(link_id).await,
+        }
+    }
+
+    /// True if the link with `link_id` is still Active.
+    ///
+    /// Only `Active` counts. A `Stale` link is one the far end has stopped
+    /// answering on, and writing to it succeeds locally while the packet goes
+    /// nowhere — exactly the failure this client must not mistake for a send.
     async fn link_is_active(&self, link_id: &LinkId) -> bool {
-        match self.transport.find_out_link(link_id).await {
-            Some(link) => link.lock().await.status() != LinkStatus::Closed,
+        match self.find_link(link_id).await {
+            Some(link) => link.lock().await.status() == LinkStatus::Active,
             None => false,
         }
+    }
+
+    /// Resolve a link id to its transport link, whether it was opened by us or
+    /// by the peer.
+    async fn find_link(&self, link_id: &LinkId) -> Option<Arc<tokio::sync::Mutex<Link>>> {
+        Self::find_any_link(&self.transport, link_id).await
     }
 
     /// Remember that `packet_hash` is awaiting a delivery proof for
@@ -611,6 +737,7 @@ impl LxmfClient {
             LinkEvent::Closed => {
                 let peer = self.peer_for_link(ev.id).await;
                 self.links.lock().await.retain(|_, id| *id != ev.id);
+                self.in_links.lock().await.retain(|_, id| *id != ev.id);
                 // Drop reachability recorded through this link. For an in-link
                 // the mapping was filed under the remote's address (which the
                 // link event does not carry), so match on the recorded link id
@@ -645,6 +772,13 @@ impl LxmfClient {
                 link_id,
             );
         }
+
+        // Remember the link this peer reached us on, so a reply can go back
+        // over it instead of needing a path to the peer's own destination.
+        self.in_links
+            .lock()
+            .await
+            .insert(AddressHash::new(message.source_hash), link_id);
 
         // Only accept messages addressed to this client's LXMF address.
         let is_ours = message.destination_hash == self.delivery_address.as_slice()[..];
