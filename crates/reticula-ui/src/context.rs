@@ -2,7 +2,7 @@
 
 use reticula_nomad::page::Page;
 
-use crate::command::{LoraSettings, PeerProtocol};
+use crate::command::{GpsSettings, LoraSettings, PeerProtocol};
 
 /// A conversation in the chat list.
 #[derive(Debug, Clone, Default)]
@@ -100,6 +100,14 @@ pub struct ViewContext<'a> {
     pub wifi_ssid: &'a str,
     /// The currently configured LoRa radio settings.
     pub lora_settings: Option<&'a LoraSettings>,
+    /// The currently configured GNSS settings.
+    pub gps_settings: Option<&'a GpsSettings>,
+    /// Current system clock, in Unix seconds.
+    ///
+    /// `None` on hosts with no settable clock. On an embedded target that has
+    /// not yet recovered a time this can be below `PLAUSIBLE_UNIX_TIME`
+    /// (~1970), which the System page reports rather than hides.
+    pub system_time: Option<u64>,
     /// Remote Reticulum peer (`host:port`) currently configured, if any.
     pub peer_addr: &'a str,
     /// Protocol used to reach the remote peer.

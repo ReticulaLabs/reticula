@@ -15,17 +15,7 @@ use crate::command::{Command, ScreenId};
 use crate::context::ViewContext;
 use crate::screens::ListState;
 use crate::theme::Theme;
-use crate::widgets::{self, px};
-
-/// One entry on the root menu.
-struct MenuItem {
-    /// Section name, shown next to the icon.
-    title: &'static str,
-    /// Short description shown beneath the name.
-    subtitle: &'static str,
-    /// Icon shown on the left of the row.
-    icon: widgets::MenuIcon,
-}
+use crate::widgets::{self, px, MenuItem};
 
 #[derive(Default)]
 pub struct HomeScreen {
@@ -120,68 +110,19 @@ impl HomeScreen {
         )
         .ok();
 
-        // Each row is about a sixth of the screen tall and spans the full
-        // width. The whole group is top-aligned just under the status band,
-        // starting on the text grid so labels stay crisp on the low-resolution
-        // LCD (and readable in the terminal simulator).
-        let row_h = (height / 6).max(theme.line_h + 8);
-        let mut y = theme.line_h * 2;
-
-        for (i, item) in Self::ITEMS.iter().enumerate() {
-            let selected = i == self.state.selected;
-            let row = Rectangle::new(Point::new(0, y), px(width, row_h));
-
-            if selected {
-                widgets::fill_rect(target, row, theme.selection).ok();
-                // Left accent bar marks the active row.
-                widgets::fill_rect(
-                    target,
-                    Rectangle::new(Point::new(0, y), px(3, row_h)),
-                    theme.accent,
-                )
-                .ok();
-            }
-
-            // A hairline divider between rows, but not below the last one.
-            if i + 1 < Self::ITEMS.len() {
-                widgets::fill_rect(
-                    target,
-                    Rectangle::new(Point::new(0, y + row_h - 1), px(width, 1)),
-                    theme.border,
-                )
-                .ok();
-            }
-
-            // Icon, vertically centred in the row.
-            let icon_x = 12;
-            let icon_y = y + (row_h - widgets::MENU_ICON) / 2;
-            let icon_color = if selected { theme.selection_text } else { theme.accent };
-            widgets::draw_menu_icon(target, item.icon, Point::new(icon_x, icon_y), icon_color)
-                .ok();
-
-            // Title and description, to the right of the icon.
-            let text_x = 48;
-            let title_color = if selected { theme.selection_text } else { theme.text };
-            let sub_color = if selected { theme.selection_text } else { theme.text_dim };
-            widgets::draw_text(
-                target,
-                Point::new(text_x, y + theme.line_h),
-                item.title,
-                title_color,
-                theme,
-            )
-            .ok();
-            widgets::draw_text(
-                target,
-                Point::new(text_x, y + theme.line_h * 2),
-                item.subtitle,
-                sub_color,
-                theme,
-            )
-            .ok();
-
-            y += row_h;
-        }
+        // Full-width rows, top-aligned just under the status band and starting
+        // on the text grid so labels stay crisp on the low-resolution LCD (and
+        // readable in the terminal simulator). The row height comes from the
+        // shared list renderer, so the settings menu matches this one exactly.
+        widgets::draw_menu_list(
+            target,
+            width,
+            height,
+            theme.line_h * 2,
+            &Self::ITEMS,
+            self.state.selected,
+            theme,
+        );
 
         let footer = Rectangle::new(
             Point::new(0, height - theme.line_h),

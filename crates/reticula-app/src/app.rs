@@ -37,9 +37,13 @@ use reticula_ui::screens::nomad_view::NomadViewScreen;
 use reticula_ui::screens::settings::SettingsScreen;
 use reticula_ui::screens::settings_data::SettingsDataScreen;
 use reticula_ui::screens::settings_identity::SettingsIdentityScreen;
+use reticula_ui::screens::settings_gps::SettingsGpsScreen;
 use reticula_ui::screens::settings_lora::SettingsLoraScreen;
+use reticula_ui::screens::settings_system::SettingsSystemScreen;
 use reticula_ui::screens::settings_wifi::SettingsWifiScreen;
-use reticula_ui::{Command, LoraSettings, PeerProtocol, Screen, ScreenId, Theme, WifiSettings};
+use reticula_ui::{
+    Command, GpsSettings, LoraSettings, PeerProtocol, Screen, ScreenId, Theme, WifiSettings,
+};
 
 use crate::config::NetConfig;
 
@@ -59,6 +63,39 @@ pub type PersistIdentity = Box<dyn Fn(&PrivateIdentity) + Send + 'static>;
 pub type PersistWifi = Box<dyn Fn(&WifiSettings) + Send + 'static>;
 /// Persists new LoRa radio settings (NVS on device). No-op on the simulator.
 pub type PersistLora = Box<dyn Fn(&LoraSettings) + Send + 'static>;
+/// Persists new GNSS settings (NVS on device). No-op on the simulator.
+pub type PersistGps = Box<dyn Fn(&GpsSettings) + Send + 'static>;
+
+/// The platform's wall clock, as seen by the application.
+///
+/// Implemented by the firmware over `settimeofday`, which is what backs the
+/// manual time setting in Settings → System.
+pub trait Clock: Send + Sync {
+    /// Current time in Unix seconds, or `None` if unavailable.
+    fn now(&self) -> Option<u64>;
+    /// Set the clock. Returns whether it was applied; a backend that cannot
+    /// set the time returns `false`.
+    fn set(&self, unix_secs: u64) -> bool;
+}
+
+/// A read-only view of the host system clock, used by the simulator.
+///
+/// [`Clock::set`] deliberately does nothing: the simulator is a development
+/// tool and must not re-time the machine it runs on.
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Option<u64> {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs())
+    }
+
+    fn set(&self, _unix_secs: u64) -> bool {
+        false
+    }
+}
 
 /// Errors produced by the application.
 #[derive(Debug)]
@@ -134,8 +171,14 @@ pub struct ReticulaApp<B: Board> {
     peer_proto: PeerProtocol,
     /// The currently configured LoRa radio settings.
     lora_settings: LoraSettings,
+    /// The currently configured GNSS settings.
+    gps_settings: GpsSettings,
+    /// Read/write access to the system wall clock.
+    clock: Box<dyn Clock>,
     /// Transient notice shown on the settings screens (e.g. "restarting…").
     notice: String,
+    /// Persists GNSS settings across the restart the command triggers.
+    persist_gps: Option<PersistGps>,
     /// Set when the app must restart (identity regenerated / WiFi changed).
     restart_requested: bool,
     /// Interface address of the IP (WiFi) Reticulum interface, if configured.
@@ -162,6 +205,8 @@ impl<B: Board> ReticulaApp<B> {
         persist_identity: Option<PersistIdentity>,
         persist_wifi: Option<PersistWifi>,
         persist_lora: Option<PersistLora>,
+        persist_gps: Option<PersistGps>,
+        clock: Option<Box<dyn Clock>>,
     ) -> Result<Self, AppError> {
         let (transport, delivery, wifi_iface, lora_iface) =
             build_transport(&identity, &net).await?;
@@ -212,6 +257,10 @@ impl<B: Board> ReticulaApp<B> {
         };
 
         Ok(Self {
+            gps_settings: GpsSettings {
+                enabled: net.gps_enabled,
+            },
+            clock: clock.unwrap_or_else(|| Box::new(SystemClock)),
             board,
             theme: Theme::default(),
             lxmf,
@@ -230,6 +279,7 @@ impl<B: Board> ReticulaApp<B> {
             persist_identity,
             persist_wifi,
             persist_lora,
+            persist_gps,
             wifi_ssid,
             wifi_enabled,
             peer_addr,
@@ -480,6 +530,24 @@ impl<B: Board> ReticulaApp<B> {
                 self.notice = "LoRa settings saved. Restarting…".to_string();
                 self.restart_requested = true;
             }
+            Command::SaveGps(settings) => {
+                if let Some(persist) = &self.persist_gps {
+                    persist(&settings);
+                }
+                self.gps_settings = settings;
+                self.notice = "GPS settings saved. Restarting…".to_string();
+                self.restart_requested = true;
+            }
+            Command::SetTime(unix) => {
+                // Deliberately no restart: the clock is not part of the
+                // transport's configuration, and a reboot would wipe the very
+                // setting we just made (the T-Deck has no RTC).
+                if self.clock.set(unix) {
+                    self.notice = "Time set.".to_string();
+                } else {
+                    self.notice = "Cannot set the clock on this platform.".to_string();
+                }
+            }
         }
     }
 
@@ -497,6 +565,8 @@ impl<B: Board> ReticulaApp<B> {
             ScreenId::SettingsIdentity => Screen::SettingsIdentity(SettingsIdentityScreen::new()),
             ScreenId::SettingsWifi => Screen::SettingsWifi(SettingsWifiScreen::new()),
             ScreenId::SettingsLora => Screen::SettingsLora(SettingsLoraScreen::new()),
+            ScreenId::SettingsGps => Screen::SettingsGps(SettingsGpsScreen::new()),
+            ScreenId::SettingsSystem => Screen::SettingsSystem(SettingsSystemScreen::new()),
             ScreenId::SettingsData => Screen::SettingsData(SettingsDataScreen::new()),
             ScreenId::Chat | ScreenId::NomadView => return, // opened with context
         };
@@ -734,6 +804,7 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
             peer_addr,
             peer_proto,
             lora_settings,
+            gps_settings,
             notice,
             ..
         } = self;
@@ -758,6 +829,8 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
             notice: notice.as_str(),
             wifi_ssid: wifi_ssid.as_str(),
             lora_settings: Some(lora_settings),
+            gps_settings: Some(gps_settings),
+            system_time: self.clock.now(),
             peer_addr: peer_addr.as_str(),
             peer_proto: *peer_proto,
             network: NetworkState {

@@ -23,7 +23,8 @@ pub fn fill_rect<D>(target: &mut D, rect: Rectangle, color: Rgb565) -> Result<()
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    rect.into_styled(PrimitiveStyle::with_fill(color)).draw(target)
+    rect.into_styled(PrimitiveStyle::with_fill(color))
+        .draw(target)
 }
 
 /// Draw a single line of text at `at` (top-left), using `Baseline::Top`.
@@ -61,11 +62,7 @@ pub fn draw_highlight<D>(
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    fill_rect(
-        target,
-        Rectangle::new(at, px(width, theme.line_h)),
-        bg,
-    )?;
+    fill_rect(target, Rectangle::new(at, px(width, theme.line_h)), bg)?;
     // A leading cursor marker makes the selected row obvious.
     draw_text(target, at, ">", fg, theme)?;
     let max_chars = theme.chars_per_line(width - theme.char_w);
@@ -166,7 +163,13 @@ where
     let text_color = fg;
     // Text is aligned to the 6×10 glyph grid so the terminal simulator can
     // reconstruct characters from the framebuffer.
-    draw_text(target, rect.top_left + Point::new(0, 0), label, text_color, theme)?;
+    draw_text(
+        target,
+        rect.top_left + Point::new(0, 0),
+        label,
+        text_color,
+        theme,
+    )?;
     if !right_label.is_empty() {
         let width = rect.size.width as i32;
         let max_chars = theme.chars_per_line(width);
@@ -198,7 +201,11 @@ where
     let header = Rectangle::new(Point::new(0, 0), px(width, height));
     fill_rect(target, header, theme.header)?;
     // 1-px underline separates the header from the body below it.
-    fill_rect(target, Rectangle::new(Point::new(0, height - 1), px(width, 1)), theme.border)?;
+    fill_rect(
+        target,
+        Rectangle::new(Point::new(0, height - 1), px(width, 1)),
+        theme.border,
+    )?;
     draw_text(target, Point::new(0, 0), title, theme.header_text, theme)?;
 
     let cw = theme.char_w;
@@ -206,11 +213,7 @@ where
     // LoRa icon (far right): an antenna, green when online, red (struck
     // through) when offline.
     let lora_online = matches!(network.lora_online, Some(true));
-    let lora_color = if lora_online {
-        theme.ok
-    } else {
-        theme.danger
-    };
+    let lora_color = if lora_online { theme.ok } else { theme.danger };
     let lora_icon_w = 5;
     let lora_x = width - 2 - lora_icon_w;
     draw_lora_icon(target, Point::new(lora_x, 1), lora_online, lora_color)?;
@@ -228,11 +231,7 @@ where
     } else {
         1
     };
-    let wifi_color = if wifi_online {
-        theme.ok
-    } else {
-        theme.danger
-    };
+    let wifi_color = if wifi_online { theme.ok } else { theme.danger };
     let wifi_icon_w = 13;
     let wifi_x = lora_x - 2 - wifi_icon_w;
     draw_wifi_icon(target, Point::new(wifi_x, 1), wifi_level, wifi_color)?;
@@ -263,7 +262,13 @@ where
         let max = ((wifi_x - 2) / cw).max(1) as usize;
         let trimmed: String = right_label.chars().take(max).collect();
         let rl_x = wifi_x - 2 - (trimmed.chars().count() as i32) * cw;
-        draw_text(target, Point::new(rl_x, 0), &trimmed, theme.header_text, theme)?;
+        draw_text(
+            target,
+            Point::new(rl_x, 0),
+            &trimmed,
+            theme.header_text,
+            theme,
+        )?;
     }
 
     Ok(())
@@ -273,12 +278,7 @@ where
 ///
 /// A base dot plus up to three radiating arcs; `level` (1–4) selects how many
 /// arcs are lit, so stronger signals show a fuller fan.
-fn draw_wifi_icon<D>(
-    target: &mut D,
-    at: Point,
-    level: u8,
-    color: Rgb565,
-) -> Result<(), D::Error>
+fn draw_wifi_icon<D>(target: &mut D, at: Point, level: u8, color: Rgb565) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
@@ -319,12 +319,7 @@ where
 ///
 /// A single vertical mast with a tip ball. When `online` is false a diagonal
 /// strike is drawn through it.
-fn draw_lora_icon<D>(
-    target: &mut D,
-    at: Point,
-    online: bool,
-    color: Rgb565,
-) -> Result<(), D::Error>
+fn draw_lora_icon<D>(target: &mut D, at: Point, online: bool, color: Rgb565) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
@@ -370,6 +365,137 @@ pub enum MenuIcon {
     Lora,
     /// Data management: a database.
     Data,
+    /// GPS: a satellite over horizon arcs.
+    Gps,
+    /// Clock: a dial with hands.
+    Clock,
+}
+
+/// One entry in a full-width menu list.
+#[derive(Debug, Clone, Copy)]
+pub struct MenuItem {
+    /// Section name, shown next to the icon.
+    pub title: &'static str,
+    /// Short description shown beneath the name.
+    pub subtitle: &'static str,
+    /// Icon shown on the left of the row.
+    pub icon: MenuIcon,
+}
+
+/// Number of rows the row height is proportioned for.
+///
+/// Both menus are sized for this many rows, which is why they look the same
+/// even though the settings menu has more entries.
+const MENU_REFERENCE_ROWS: i32 = 4;
+
+/// Height of one row in a full-width menu list.
+///
+/// Shared by the root and settings menus so they are identical by construction
+/// rather than by keeping two copies of the same arithmetic in step. Sized for
+/// [`MENU_REFERENCE_ROWS`] entries; a longer list is squeezed to fit rather than
+/// allowed to run off the bottom of the screen.
+pub fn menu_row_height(height: i32, theme: &Theme, item_count: usize) -> i32 {
+    // Room between the header/status band and the footer bar.
+    let available = (height - theme.line_h * 2 - theme.line_h).max(theme.line_h);
+    let preferred = height / (MENU_REFERENCE_ROWS + 2);
+    let per_item = available / item_count.max(1) as i32;
+
+    // Fitting wins over the preferred height, and a cramped row beats one that
+    // runs off the bottom of the screen — a row the footer hides is worse than
+    // a row with less padding. The `max(1)` only guards against a degenerate
+    // zero-height display.
+    preferred.min(per_item).max(1)
+}
+
+/// Draw a full-width menu list starting at `top`, and return the y coordinate
+/// just past the last row.
+///
+/// `selected` is the index of the highlighted row. Rows are full width, each
+/// [`menu_row_height`] tall, with the section icon on the left and the name
+/// plus description beside it.
+pub fn draw_menu_list<D>(
+    target: &mut D,
+    width: i32,
+    height: i32,
+    top: i32,
+    items: &[MenuItem],
+    selected: usize,
+    theme: &Theme,
+) -> i32
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let row_h = menu_row_height(height, theme, items.len());
+    let mut y = top;
+
+    for (i, item) in items.iter().enumerate() {
+        let is_selected = i == selected;
+        let row = Rectangle::new(Point::new(0, y), px(width, row_h));
+
+        if is_selected {
+            fill_rect(target, row, theme.selection).ok();
+            // Left accent bar marks the active row.
+            fill_rect(
+                target,
+                Rectangle::new(Point::new(0, y), px(3, row_h)),
+                theme.accent,
+            )
+            .ok();
+        }
+
+        // A hairline divider between rows, but not below the last one.
+        if i + 1 < items.len() {
+            fill_rect(
+                target,
+                Rectangle::new(Point::new(0, y + row_h - 1), px(width, 1)),
+                theme.border,
+            )
+            .ok();
+        }
+
+        // Icon, vertically centred in the row.
+        let icon_x = 12;
+        let icon_y = y + (row_h - MENU_ICON) / 2;
+        let icon_color = if is_selected {
+            theme.selection_text
+        } else {
+            theme.accent
+        };
+        draw_menu_icon(target, item.icon, Point::new(icon_x, icon_y), icon_color).ok();
+
+        // Title and description, to the right of the icon.
+        let text_x = 48;
+        let title_color = if is_selected {
+            theme.selection_text
+        } else {
+            theme.text
+        };
+        let sub_color = if is_selected {
+            theme.selection_text
+        } else {
+            theme.text_dim
+        };
+        draw_text(
+            target,
+            Point::new(text_x, y + theme.line_h),
+            item.title,
+            title_color,
+            theme,
+        )
+        .ok();
+        draw_text(
+            target,
+            Point::new(text_x, y + theme.line_h * 2),
+            item.subtitle,
+            sub_color,
+            theme,
+        )
+        .ok();
+
+        y += row_h;
+    }
+
+    y
 }
 
 /// Draw the [`MenuIcon`] `icon` with its `MENU_ICON`×`MENU_ICON` bounding box
@@ -391,6 +517,8 @@ where
         MenuIcon::Wifi => draw_wifi_menu_icon(target, at, color),
         MenuIcon::Lora => draw_lora_menu_icon(target, at, color),
         MenuIcon::Data => draw_data_menu_icon(target, at, color),
+        MenuIcon::Gps => draw_gps_menu_icon(target, at, color),
+        MenuIcon::Clock => draw_clock_menu_icon(target, at, color),
     }
 }
 
@@ -431,7 +559,9 @@ where
 {
     let stroke = PrimitiveStyle::with_stroke(color, 1);
     // Outer sphere.
-    Circle::new(at + Point::new(3, 3), 18).into_styled(stroke).draw(target)?;
+    Circle::new(at + Point::new(3, 3), 18)
+        .into_styled(stroke)
+        .draw(target)?;
     // Vertical meridian.
     Ellipse::new(at + Point::new(8, 3), Size::new(8, 18))
         .into_styled(stroke)
@@ -450,7 +580,9 @@ where
 {
     let stroke = PrimitiveStyle::with_stroke(color, 1);
     // Head.
-    Circle::new(at + Point::new(8, 3), 8).into_styled(stroke).draw(target)?;
+    Circle::new(at + Point::new(8, 3), 8)
+        .into_styled(stroke)
+        .draw(target)?;
     // Shoulders: the upper half of a circle.
     Arc::new(
         at + Point::new(3, 12),
@@ -485,8 +617,12 @@ where
         Line::new(c + a, c + b).into_styled(stroke).draw(target)?;
     }
     // Rim and hub.
-    Circle::new(c - Point::new(7, 7), 14).into_styled(stroke).draw(target)?;
-    Circle::new(c - Point::new(2, 2), 4).into_styled(stroke).draw(target)?;
+    Circle::new(c - Point::new(7, 7), 14)
+        .into_styled(stroke)
+        .draw(target)?;
+    Circle::new(c - Point::new(2, 2), 4)
+        .into_styled(stroke)
+        .draw(target)?;
     Ok(())
 }
 
@@ -534,12 +670,22 @@ where
     for r in [5i32, 8] {
         let d = (r * 2) as u32;
         let top_left = at + Point::new(12 - r, 8 - r);
-        Arc::new(top_left, d, Angle::from_degrees(135.0), Angle::from_degrees(90.0))
-            .into_styled(stroke)
-            .draw(target)?;
-        Arc::new(top_left, d, Angle::from_degrees(315.0), Angle::from_degrees(90.0))
-            .into_styled(stroke)
-            .draw(target)?;
+        Arc::new(
+            top_left,
+            d,
+            Angle::from_degrees(135.0),
+            Angle::from_degrees(90.0),
+        )
+        .into_styled(stroke)
+        .draw(target)?;
+        Arc::new(
+            top_left,
+            d,
+            Angle::from_degrees(315.0),
+            Angle::from_degrees(90.0),
+        )
+        .into_styled(stroke)
+        .draw(target)?;
     }
     Ok(())
 }
@@ -580,6 +726,92 @@ where
     Ok(())
 }
 
+/// A satellite above radiating horizon arcs, for the GPS section.
+///
+/// The horizon is a flat baseline rather than a circle: the icon is 24 px, and
+/// concentric arcs read as "signal" at that size where a full orbit does not.
+fn draw_gps_menu_icon<D>(target: &mut D, at: Point, color: Rgb565) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let stroke = PrimitiveStyle::with_stroke(color, 1);
+    let fill = PrimitiveStyle::with_fill(color);
+
+    // Horizon: a baseline with short end ticks.
+    Line::new(at + Point::new(3, 21), at + Point::new(21, 21))
+        .into_styled(stroke)
+        .draw(target)?;
+    for x in [3, 21] {
+        Line::new(at + Point::new(x, 18), at + Point::new(x, 21))
+            .into_styled(stroke)
+            .draw(target)?;
+    }
+
+    // Broadcast arcs opening upward from the horizon's centre.
+    for r in [4i32, 7] {
+        let d = (r * 2) as u32;
+        let top_left = at + Point::new(12 - r, 21 - r);
+        Arc::new(
+            top_left,
+            d,
+            Angle::from_degrees(180.0),
+            Angle::from_degrees(180.0),
+        )
+        .into_styled(stroke)
+        .draw(target)?;
+    }
+
+    // Satellite body above the arcs, with two short solar panels.
+    let body = Rectangle::new(at + Point::new(9, 3), Size::new(6, 5));
+    body.into_styled(fill).draw(target)?;
+    for x in [6, 15] {
+        Line::new(at + Point::new(x, 4), at + Point::new(x, 7))
+            .into_styled(stroke)
+            .draw(target)?;
+    }
+    Line::new(at + Point::new(4, 4), at + Point::new(6, 5))
+        .into_styled(stroke)
+        .draw(target)?;
+    Line::new(at + Point::new(20, 4), at + Point::new(18, 5))
+        .into_styled(stroke)
+        .draw(target)?;
+
+    Ok(())
+}
+
+/// A clock dial with hands at roughly ten past ten, for the System section.
+fn draw_clock_menu_icon<D>(target: &mut D, at: Point, color: Rgb565) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let stroke = PrimitiveStyle::with_stroke(color, 1);
+
+    // Dial.
+    Circle::new(at + Point::new(3, 3), 18)
+        .into_styled(stroke)
+        .draw(target)?;
+
+    // Hour marks at 12 and 6.
+    for y in [3, 19] {
+        Line::new(at + Point::new(12, y), at + Point::new(12, y + 2))
+            .into_styled(stroke)
+            .draw(target)?;
+    }
+
+    // Hands: hour towards 10, minute towards 2, from the dial's centre.
+    // `at` offsets every coordinate — the dial is drawn at `at + (3, 3)` with
+    // diameter 18, so its centre is `at + (12, 12)`.
+    let c = at + Point::new(12, 12);
+    Line::new(c, at + Point::new(8, 7))
+        .into_styled(stroke)
+        .draw(target)?;
+    Line::new(c, at + Point::new(17, 9))
+        .into_styled(stroke)
+        .draw(target)?;
+
+    Ok(())
+}
+
 /// Draw a scrollbar on the right edge of `viewport` representing
 /// `offset`/`total` visible lines.
 pub fn draw_scrollbar<D>(
@@ -603,10 +835,7 @@ where
     let y = viewport.top_left.y + ((track_h - thumb_h) as f32 * ratio) as i32;
     fill_rect(
         target,
-        Rectangle::new(
-            viewport.top_left + Point::new(track, y),
-            px(2, thumb_h),
-        ),
+        Rectangle::new(viewport.top_left + Point::new(track, y), px(2, thumb_h)),
         theme.border,
     )
 }
@@ -677,5 +906,168 @@ pub fn hops_label(hops: Option<u8>) -> String {
         Some(1) => "(1 hop)".to_string(),
         Some(n) => format!("({n} hops)"),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use embedded_graphics::mock_display::MockDisplay;
+    use embedded_graphics::primitives::Rectangle;
+
+    /// Every menu icon, so a new variant cannot be added without being covered.
+    const ALL_ICONS: [MenuIcon; 8] = [
+        MenuIcon::Chat,
+        MenuIcon::Nomad,
+        MenuIcon::Identity,
+        MenuIcon::Settings,
+        MenuIcon::Wifi,
+        MenuIcon::Lora,
+        MenuIcon::Gps,
+        MenuIcon::Clock,
+    ];
+
+    /// An icon must paint only inside its own `MENU_ICON`-sized box.
+    ///
+    /// Every coordinate in an icon body has to be offset by `at`; a bare
+    /// `Point::new(..)` resolves against the screen origin instead, which
+    /// draws a stray line from the icon back to the top-left of the display.
+    /// That is invisible in review and obvious on the panel, so pin it down.
+    #[test]
+    fn icons_stay_inside_their_own_box() {
+        // Somewhere well away from the origin, so a missing `at +` offset
+        // cannot accidentally land inside the expected box. `MockDisplay` is
+        // 64×64, so a 24×24 icon has to start at or below (40, 40).
+        let at = Point::new(20, 20);
+        let expected = Rectangle::new(at, Size::new(MENU_ICON as u32, MENU_ICON as u32));
+
+        for icon in ALL_ICONS {
+            let mut canvas: MockDisplay<Rgb565> = MockDisplay::new();
+            canvas.set_allow_out_of_bounds_drawing(false);
+            // Icons legitimately overlap themselves — the dial's stroke crosses
+            // its hour marks — so overdraw is fine; only *where* they land
+            // matters here.
+            canvas.set_allow_overdraw(true);
+            draw_menu_icon(&mut canvas, icon, at, Rgb565::new(31, 31, 31)).unwrap();
+
+            let drawn = canvas.affected_area();
+            // If `drawn` is entirely inside `expected`, intersecting them
+            // yields `drawn` unchanged. Anything that escaped the box clips it
+            // and the two differ.
+            assert_eq!(
+                drawn.intersection(&expected),
+                drawn,
+                "{icon:?} painted outside its {MENU_ICON}x{MENU_ICON} box: drew {drawn:?}, \
+                 expected within {expected:?}",
+            );
+        }
+    }
+
+    /// Every icon should actually draw something; a completely blank one would
+    /// otherwise pass the containment check above.
+    #[test]
+    fn icons_are_not_blank() {
+        let at = Point::new(20, 20);
+        for icon in ALL_ICONS {
+            let mut canvas: MockDisplay<Rgb565> = MockDisplay::new();
+            canvas.set_allow_overdraw(true);
+            draw_menu_icon(&mut canvas, icon, at, Rgb565::new(31, 31, 31)).unwrap();
+
+            let area = canvas.affected_area();
+            let painted = area.size.width * area.size.height;
+            assert!(
+                painted > 20,
+                "{icon:?} looks blank (affected area {area:?})",
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    use crate::theme::{Theme, DISPLAY_H, DISPLAY_W};
+
+    /// Top of the menu list: below the header and status band.
+    fn top() -> i32 {
+        Theme::default().line_h * 2
+    }
+
+    /// Both menus must use the same row height, so they look identical
+    /// regardless of how many entries each has.
+    #[test]
+    fn menus_with_different_item_counts_share_a_row_height() {
+        let theme = Theme::default();
+        let home = menu_row_height(DISPLAY_H, &theme, 4);
+        let settings = menu_row_height(DISPLAY_H, &theme, 5);
+        assert_eq!(
+            home, settings,
+            "the root and settings menus must have identical row heights"
+        );
+    }
+
+    /// A list must never run into the footer bar, whatever its length. This is
+    /// the regression the settings menu hit when it gained its fifth entry.
+    #[test]
+    fn a_long_list_stays_clear_of_the_footer() {
+        let theme = Theme::default();
+        for count in 1..=12 {
+            let row_h = menu_row_height(DISPLAY_H, &theme, count);
+            let bottom = top() + row_h * count as i32;
+            assert!(
+                bottom <= DISPLAY_H - theme.line_h,
+                "{count} items overflow: rows end at {bottom}, footer starts at {}",
+                DISPLAY_H - theme.line_h
+            );
+        }
+    }
+
+    /// Every row must be tall enough to hold its two lines of text, for any list
+    /// short enough that the rows are not already squeezed to fit.
+    #[test]
+    fn rows_are_never_shorter_than_their_content() {
+        let theme = Theme::default();
+        let available = DISPLAY_H - theme.line_h * 2 - theme.line_h;
+
+        for count in 1..=12 {
+            let row_h = menu_row_height(DISPLAY_H, &theme, count);
+            let comfortable = available / count as i32 >= theme.line_h * 3;
+
+            if comfortable {
+                assert!(
+                    row_h >= theme.line_h * 2,
+                    "{count} items: row {row_h} is too short for two text lines"
+                );
+                assert!(
+                    row_h >= MENU_ICON,
+                    "{count} items: row {row_h} is shorter than the {MENU_ICON}px icon"
+                );
+            }
+        }
+    }
+
+    /// The two menus must land on the same row pitch on the real panel.
+    #[test]
+    fn row_geometry_matches_the_panel() {
+        let theme = Theme::default();
+        let row_h = menu_row_height(DISPLAY_H, &theme, 5);
+        assert_eq!(
+            (row_h, top() + row_h * 5),
+            (40, 220),
+            "5 settings rows should be 40px each, ending at y=220 with the footer at 230"
+        );
+        assert!(220 <= DISPLAY_H - theme.line_h);
+    }
+
+    /// A tiny display must still produce a usable row height rather than
+    /// dividing down to nothing.
+    #[test]
+    fn degenerate_sizes_do_not_divide_by_zero() {
+        let theme = Theme::default();
+        assert!(menu_row_height(0, &theme, 0) >= 1);
+        assert!(menu_row_height(10, &theme, 3) >= 1);
+        assert_eq!(DISPLAY_W, 320);
     }
 }

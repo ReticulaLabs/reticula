@@ -8,8 +8,10 @@ pub mod nomad_list;
 pub mod nomad_view;
 pub mod settings;
 pub mod settings_data;
+pub mod settings_gps;
 pub mod settings_identity;
 pub mod settings_lora;
+pub mod settings_system;
 pub mod settings_wifi;
 
 use embedded_graphics::draw_target::DrawTarget;
@@ -29,8 +31,10 @@ use nomad_list::NomadListScreen;
 use nomad_view::NomadViewScreen;
 use settings::SettingsScreen;
 use settings_data::SettingsDataScreen;
+use settings_gps::SettingsGpsScreen;
 use settings_identity::SettingsIdentityScreen;
 use settings_lora::SettingsLoraScreen;
+use settings_system::SettingsSystemScreen;
 use settings_wifi::SettingsWifiScreen;
 
 /// The active screen. Rendered through the generic display draw target and
@@ -47,6 +51,8 @@ pub enum Screen {
     SettingsIdentity(SettingsIdentityScreen),
     SettingsWifi(SettingsWifiScreen),
     SettingsLora(SettingsLoraScreen),
+    SettingsGps(SettingsGpsScreen),
+    SettingsSystem(SettingsSystemScreen),
 }
 
 impl Screen {
@@ -63,6 +69,8 @@ impl Screen {
             Screen::SettingsIdentity(_) => ScreenId::SettingsIdentity,
             Screen::SettingsWifi(_) => ScreenId::SettingsWifi,
             Screen::SettingsLora(_) => ScreenId::SettingsLora,
+            Screen::SettingsGps(_) => ScreenId::SettingsGps,
+            Screen::SettingsSystem(_) => ScreenId::SettingsSystem,
         }
     }
 
@@ -79,6 +87,8 @@ impl Screen {
             Screen::SettingsIdentity(s) => s.handle_key(key),
             Screen::SettingsWifi(s) => s.handle_key(key),
             Screen::SettingsLora(s) => s.handle_key(key),
+            Screen::SettingsGps(s) => s.handle_key(key),
+            Screen::SettingsSystem(s) => s.handle_key(key),
         }
     }
 
@@ -99,6 +109,8 @@ impl Screen {
             Screen::SettingsIdentity(s) => s.render(target, ctx, theme),
             Screen::SettingsWifi(s) => s.render(target, ctx, theme),
             Screen::SettingsLora(s) => s.render(target, ctx, theme),
+            Screen::SettingsGps(s) => s.render(target, ctx, theme),
+            Screen::SettingsSystem(s) => s.render(target, ctx, theme),
         }
     }
 
@@ -111,6 +123,9 @@ impl Screen {
                 | Screen::SettingsIdentity(_)
                 | Screen::SettingsWifi(_)
                 | Screen::SettingsLora(_)
+                // The System page takes digits one field at a time, so the
+                // on-screen keyboard belongs to it too.
+                | Screen::SettingsSystem(_)
         )
     }
 }

@@ -27,6 +27,8 @@
 
 use esp_idf_sys::{settimeofday, timeval, timezone};
 
+use reticula_app::Clock;
+
 /// Unix time below which the system clock is certainly unset.
 ///
 /// This is the 2020-09-13 threshold; anything below it is not a real time, and
@@ -38,12 +40,15 @@ pub const PLAUSIBLE_UNIX_TIME: u64 = 1_600_000_000;
 pub enum Source {
     /// GNSS (the T-Deck's MIA-M10Q).
     Gnss,
+    /// Typed in by hand on the Settings → System page.
+    Manual,
 }
 
 impl core::fmt::Display for Source {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
             Source::Gnss => "GNSS",
+            Source::Manual => "manual",
         })
     }
 }
@@ -71,9 +76,7 @@ pub fn set_system_time(secs: u64, source: Source) -> bool {
     let current = unix_time_secs();
 
     if secs < PLAUSIBLE_UNIX_TIME {
-        log::warn!(
-            "{source}: ignoring implausible time {secs} (before {PLAUSIBLE_UNIX_TIME})"
-        );
+        log::warn!("{source}: ignoring implausible time {secs} (before {PLAUSIBLE_UNIX_TIME})");
         return false;
     }
 
@@ -122,6 +125,24 @@ pub fn log_status(when: &str) {
         );
     } else {
         log::info!("{when}: system clock is {now} (plausible)");
+    }
+}
+
+/// The device's wall clock, as the application's [`Clock`].
+///
+/// [`set_system_time`] applies the plausibility and never-go-backwards rules,
+/// which is what a manual correction from Settings → System must also obey: a
+/// backwards step would make the node's own next announce look stale, which is
+/// the failure this whole module exists to prevent.
+pub struct DeviceClock;
+
+impl Clock for DeviceClock {
+    fn now(&self) -> Option<u64> {
+        Some(unix_time_secs())
+    }
+
+    fn set(&self, unix_secs: u64) -> bool {
+        set_system_time(unix_secs, Source::Manual)
     }
 }
 

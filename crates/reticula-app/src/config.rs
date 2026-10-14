@@ -45,6 +45,12 @@ pub struct NetConfig {
     /// is added to the transport alongside the network transport.
     #[cfg(feature = "lora")]
     pub lora: Option<reticulum_sdk::iface::lora::LoRaConfig>,
+    /// Whether the on-board GNSS should be used as a wall-clock source.
+    ///
+    /// Defaults to true: an unsynced clock gets this node's announces
+    /// discarded by every peer, so the receiver is the only time source
+    /// available to a device that is away from WiFi.
+    pub gps_enabled: bool,
 }
 
 impl Default for NetConfig {
@@ -56,6 +62,7 @@ impl Default for NetConfig {
             wifi_enabled: true,
             #[cfg(feature = "lora")]
             lora: None,
+            gps_enabled: true,
         }
     }
 }

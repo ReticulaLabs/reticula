@@ -18,9 +18,12 @@ pub mod command;
 pub mod context;
 pub mod screens;
 pub mod theme;
+pub mod timefmt;
 pub mod widgets;
 
-pub use command::{Command, LoraSettings, PeerProtocol, ScreenId, WifiSettings};
+pub use command::{
+    Command, GpsSettings, LoraSettings, PeerProtocol, ScreenId, WifiSettings,
+};
 pub use context::{ChatMessage, Conversation, NetworkState, NodeEntry, ViewContext};
 pub use screens::Screen;
 pub use theme::Theme;

@@ -88,8 +88,20 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }))
     };
 
-    let mut app =
-        ReticulaApp::new(board, identity, display_name, net, persist_identity, None, None).await?;
+    // No LoRa/GPS persistence on the simulator, and the default host clock is
+// read-only, so the System page can show the time but not change it.
+    let mut app = ReticulaApp::new(
+        board,
+        identity,
+        display_name,
+        net,
+        persist_identity,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
     app.run().await?;
     Ok(())
 }

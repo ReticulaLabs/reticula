@@ -31,7 +31,10 @@ use getrandom::SysRng;
 use rand_core::UnwrapErr;
 use reticulum_sdk::identity::PrivateIdentity;
 
-use reticula_app::{LoraSettings, NetConfig, PersistIdentity, PersistLora, PersistWifi, PeerProtocol, ReticulaApp, TransportKind, WifiSettings};
+use reticula_app::{
+    GpsSettings, LoraSettings, NetConfig, PeerProtocol, PersistGps, PersistIdentity,
+    PersistLora, PersistWifi, ReticulaApp, TransportKind, WifiSettings,
+};
 use reticula_tdeck::TDeckBoard;
 
 const WIFI_SSID: Option<&str> = option_env!("WIFI_SSID");
@@ -106,22 +109,28 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         ..
     } = Peripherals::take().map_err(|e| format!("Peripherals::take: {e}"))?;
 
+    // Whether the GNSS is used as a clock source. Read before the receiver is
+    // opened, so a disabled GNSS costs nothing.
+    let gps_enabled = load_gps_enabled(&nvs);
+
     // GNSS pins are taken before `pins` is handed to the board, so that each
     // peripheral is claimed exactly once.
-    let gnss = gps::open(
-        uart1,
-        // SAFETY: `Peripherals::take()` gave us sole ownership of every
-        // peripheral, and GPIO43/44 are wired to the GNSS and used nowhere
-        // else. The board does not touch these two.
-        unsafe { esp_idf_hal::gpio::Gpio43::new() },
-        unsafe { esp_idf_hal::gpio::Gpio44::new() },
-    );
+    let gnss = gps_enabled.then(|| {
+        gps::open(
+            uart1,
+            // SAFETY: `Peripherals::take()` gave us sole ownership of every
+            // peripheral, and GPIO43/44 are wired to the GNSS and used nowhere
+            // else. The board does not touch these two.
+            unsafe { esp_idf_hal::gpio::Gpio43::new() },
+            unsafe { esp_idf_hal::gpio::Gpio44::new() },
+        )
+    });
 
     // Wall-clock recovery runs on its own task, so the rest of the boot is not
     // held up waiting for a GNSS fix (which can take minutes) or an SNTP
     // response. Whichever source lands first wins; see `clock` for why an
     // unclocked node cannot appear on the network at all.
-    if let Some(gnss) = gnss {
+    if let Some(Some(gnss)) = gnss {
         std::thread::spawn(move || gps::spawn(gnss));
     }
     clock::log_status("startup");
@@ -215,6 +224,21 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         }))
     };
 
+    // Persist the GNSS setting so a restart triggered by another settings
+    // change does not silently revert it.
+    let persist_gps: Option<PersistGps> = {
+        let nvs = nvs.clone();
+        Some(Box::new(move |settings: &GpsSettings| {
+            let result = EspNvs::new(nvs.clone(), "reticula", true).and_then(|mut nvs| {
+                nvs.set_str("gps_enabled", if settings.enabled { "1" } else { "0" })
+            });
+            match result {
+                Ok(()) => log::info!("GPS setting saved to NVS"),
+                Err(e) => log::warn!("could not save GPS setting to NVS: {e}"),
+            }
+        }))
+    };
+
     // Optional LoRa radio (SX1262). Configured at build time via env vars, or at
 // runtime from Settings → LoRa (persisted to NVS). When absent the radio is
 // left unused.
@@ -297,6 +321,7 @@ let lora = match lora_settings {
         announce_interval: Duration::from_secs(300),
         wifi_enabled,
         lora,
+        gps_enabled,
     };
 
     log::info!("identity: {}", identity.to_hex_string());
@@ -309,6 +334,11 @@ let lora = match lora_settings {
         persist_identity,
         persist_wifi,
         persist_lora,
+        persist_gps,
+        // The device clock, shared with the Settings → System page so a manual
+        // correction goes through the same plausibility and ordering rules the
+        // automatic sources do.
+        Some(Box::new(clock::DeviceClock)),
     )
     .await
     .map_err(|e| format!("ReticulaApp::new: {e}"))?;
@@ -449,6 +479,29 @@ fn load_wifi_creds(nvs: &EspDefaultNvsPartition) -> Option<(String, String)> {
         .unwrap_or("")
         .to_string();
     Some((ssid, password))
+}
+
+/// Whether the GNSS receiver should be used as a wall-clock source.
+///
+/// Defaults to on: an unsynced clock makes every peer discard this node's
+/// announces as stale, so a device away from WiFi has no other time source.
+/// Set explicitly in Settings → GPS, or by the `gps_enabled` NVS key.
+fn load_gps_enabled(nvs: &EspDefaultNvsPartition) -> bool {
+    let mut nvs = EspNvs::new(nvs.clone(), "reticula", true).ok();
+    let mut buf = [0u8; 8];
+    match nvs.as_mut().and_then(|n| n.get_str("gps_enabled", &mut buf).ok().flatten()) {
+        Some(v) => {
+            let enabled = v.trim() == "1";
+            log::info!("GPS setting loaded from NVS (enabled={enabled})");
+            enabled
+        }
+        // No stored preference: use the receiver, since that is the only clock
+        // available without WiFi.
+        None => {
+            log::info!("GPS setting not in NVS, defaulting to enabled");
+            true
+        }
+    }
 }
 
 /// Load LoRa radio settings saved via Settings → LoRa from NVS, if present.

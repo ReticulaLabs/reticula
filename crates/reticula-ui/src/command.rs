@@ -16,6 +16,10 @@ pub enum ScreenId {
     SettingsWifi,
     /// Sub-menu: LoRa radio configuration.
     SettingsLora,
+    /// Sub-menu: GNSS (GPS) receiver.
+    SettingsGps,
+    /// Sub-menu: system information and manual clock setting.
+    SettingsSystem,
     /// Sub-menu: destructive data operations (identity regeneration).
     SettingsData,
 }
@@ -51,6 +55,23 @@ impl Default for LoraSettings {
             coding_rate: 5,
             tx_power_dbm: 14,
         }
+    }
+}
+
+/// GNSS receiver configuration, shown in the Settings → GPS sub-menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpsSettings {
+    /// Whether the GNSS is used as a wall-clock source.
+    ///
+    /// Defaults to on: an unsynced clock makes every peer discard this node's
+    /// announces as stale, so the receiver is the only time source available to
+    /// a device that is away from WiFi.
+    pub enabled: bool,
+}
+
+impl Default for GpsSettings {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
@@ -104,6 +125,13 @@ pub enum Command {
     SaveWifi(WifiSettings),
     /// Persist new LoRa radio settings and restart so they take effect.
     SaveLora(LoraSettings),
+    /// Persist new GNSS settings and restart so they take effect.
+    SaveGps(GpsSettings),
+    /// Set the system wall clock, in Unix seconds.
+    ///
+    /// Applied live — no restart — since the clock is not part of the
+    /// transport's configuration.
+    SetTime(u64),
     /// Navigate back in the screen stack.
     Back,
     /// Quit the application (host simulator).
