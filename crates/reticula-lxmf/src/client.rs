@@ -114,8 +114,13 @@ pub enum LxmfEvent {
     PeerConnected(AddressHash),
     /// A link to or from a peer closed.
     PeerDisconnected(AddressHash),
-    /// A previously sent message was acknowledged by the link layer.
-    Delivered([u8; 32]),
+    /// A previously sent message was acknowledged by the peer's link layer.
+    ///
+    /// This confirms the peer's delivery destination received and decrypted
+    /// the packet. It does *not* confirm the peer parsed, accepted, or
+    /// displayed the message — the proof is issued before the receiving
+    /// application sees the payload.
+    Acknowledged([u8; 32]),
     /// A previously sent message failed to reach its destination.
     Undeliverable { message_id: [u8; 32], reason: String },
 }
@@ -538,16 +543,18 @@ impl LxmfClient {
         pending.insert(packet_hash, (message_hash, now));
     }
 
-    /// Mark a message delivered once its link-layer proof arrives.
+    /// Mark a message acknowledged once its link-layer proof arrives.
     ///
-    /// The recipient proves every message it accepts over a link, so this is
-    /// the first point at which "the bytes were handed to the transport"
-    /// becomes "the message was actually received".
+    /// A recipient proves every packet it accepts over a link, so this is the
+    /// first point at which "the bytes were handed to the transport" becomes
+    /// "the peer's delivery destination took delivery of the bytes". It is
+    /// still not evidence that the peer parsed, accepted, or displayed the
+    /// message — see [`Delivery::Acknowledged`].
     async fn handle_link_proof(&self, packet_hash: Hash) {
         // The message is registered as pending just after `send_packed`
         // returns, so on a fast link the proof can come back before that
         // bookkeeping has run. Retry briefly rather than dropping the proof
-        // on the floor, which would leave the message stuck in "sending".
+        // on the floor, which would leave the message pending forever.
         for _ in 0..PENDING_PROOF_RETRIES {
             let Some((message_hash, _)) =
                 self.pending_proofs.lock().await.get(&packet_hash).copied()
@@ -556,10 +563,10 @@ impl LxmfClient {
                 // ones we are waiting on are interesting.
                 return;
             };
-            if self.store.lock().unwrap().set_delivery(message_hash, Delivery::Delivered) {
+            if self.store.lock().unwrap().set_delivery(message_hash, Delivery::Acknowledged) {
                 self.pending_proofs.lock().await.remove(&packet_hash);
-                debug!("lxmf: delivery confirmed for {message_hash:02x?}");
-                let _ = self.events.send(LxmfEvent::Delivered(message_hash));
+                debug!("lxmf: acknowledged by peer: {message_hash:02x?}");
+                let _ = self.events.send(LxmfEvent::Acknowledged(message_hash));
                 return;
             }
             tokio::time::sleep(PENDING_PROOF_RETRY_DELAY).await;

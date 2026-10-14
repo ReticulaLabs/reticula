@@ -23,7 +23,7 @@ pub mod message;
 pub mod store;
 
 pub use client::{LxmfClient, LxmfEvent, delivery_address_for};
-pub use message::LxmfMessage;
+pub use message::{Delivery, LxmfMessage};
 pub use store::{Direction, MessageStore};
 
 use reticulum_sdk::error::RnsError;

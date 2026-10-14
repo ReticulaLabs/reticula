@@ -186,35 +186,35 @@ mod tests {
     }
 
     #[test]
-    fn set_delivery_marks_the_message_delivered() {
+    fn set_delivery_marks_the_message_acknowledged() {
         let mut store = MessageStore::new(100);
         let peer = [7u8; 16];
         let message = sent_msg("hello");
         let hash = message.hash;
-        assert_eq!(message.delivery, Delivery::Sending, "outbound starts pending");
+        assert_eq!(message.delivery, Delivery::Pending, "outbound starts unacknowledged");
         store.push(message, Direction::Outbound);
 
-        assert!(store.set_delivery(hash, Delivery::Delivered));
-        assert_eq!(store.for_peer(&peer)[0].delivery, Delivery::Delivered);
+        assert!(store.set_delivery(hash, Delivery::Acknowledged));
+        assert_eq!(store.for_peer(&peer)[0].delivery, Delivery::Acknowledged);
     }
 
     #[test]
-    fn set_delivery_reports_no_change_when_already_set() {
+    fn set_delivery_reports_no_change_when_already_acknowledged() {
         let mut store = MessageStore::new(100);
         let message = sent_msg("hello");
         let hash = message.hash;
         store.push(message, Direction::Outbound);
 
-        assert!(store.set_delivery(hash, Delivery::Delivered));
+        assert!(store.set_delivery(hash, Delivery::Acknowledged));
         // A duplicate proof must not report a second transition.
-        assert!(!store.set_delivery(hash, Delivery::Delivered));
+        assert!(!store.set_delivery(hash, Delivery::Acknowledged));
     }
 
     #[test]
     fn set_delivery_ignores_unknown_hash() {
         let mut store = MessageStore::new(100);
         store.push(sent_msg("hi"), Direction::Outbound);
-        assert!(!store.set_delivery([0xAAu8; 32], Delivery::Delivered));
+        assert!(!store.set_delivery([0xAAu8; 32], Delivery::Acknowledged));
     }
 
     #[test]
@@ -229,10 +229,10 @@ mod tests {
         let held_by_ui = shared.clone();
         assert!(Arc::strong_count(&shared) >= 2);
 
-        assert!(store.set_delivery(hash, Delivery::Delivered));
-        assert_eq!(store.for_peer(&peer)[0].delivery, Delivery::Delivered);
+        assert!(store.set_delivery(hash, Delivery::Acknowledged));
+        assert_eq!(store.for_peer(&peer)[0].delivery, Delivery::Acknowledged);
         // The copy the UI was already holding is deliberately left alone.
-        assert_eq!(held_by_ui.delivery, Delivery::Sending);
+        assert_eq!(held_by_ui.delivery, Delivery::Pending);
     }
 
     #[test]
@@ -247,11 +247,11 @@ mod tests {
         store.push(sent_msg("three"), Direction::Outbound);
 
         // "one" was evicted; its late proof must not land on a replacement.
-        assert!(!store.set_delivery(first_hash, Delivery::Delivered));
+        assert!(!store.set_delivery(first_hash, Delivery::Acknowledged));
         assert!(store
             .for_peer(&peer)
             .iter()
-            .all(|m| m.delivery == Delivery::Sending));
+            .all(|m| m.delivery == Delivery::Pending));
     }
 
     #[test]

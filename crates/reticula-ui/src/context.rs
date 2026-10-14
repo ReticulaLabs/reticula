@@ -31,9 +31,14 @@ pub struct ChatMessage {
     /// True if the message was received (as opposed to sent).
     pub incoming: bool,
     /// True while an outgoing message has been handed to the transport but not
-    /// yet confirmed by the recipient. Such messages are drawn in the warning
-    /// colour so an unconfirmed send is distinguishable from a delivered one.
-    pub sending: bool,
+    /// yet acknowledged by the peer's link layer. Such messages are drawn in
+    /// the warning colour.
+    ///
+    /// This means "no acknowledgement yet", not "still transmitting": the
+    /// acknowledgement can already be meaningless to the sender, because it
+    /// only shows the peer's delivery destination took the bytes — not that
+    /// the peer displayed anything.
+    pub unacknowledged: bool,
     pub title: String,
     pub content: String,
     pub ts: f64,

@@ -22,8 +22,7 @@ use reticulum_sdk::transport::{Transport, TransportConfig};
 
 use reticula_hal::{Board, Display, Keyboard, KeyCode, KeyEvent, KeyState};
 use reticula_lxmf::client::{delivery_address_for, APP_NAME, DELIVERY_ASPECT};
-use reticula_lxmf::message::Delivery;
-use reticula_lxmf::{LxmfClient, LxmfEvent, MessageStore};
+use reticula_lxmf::{Delivery, LxmfClient, LxmfEvent, MessageStore};
 use reticula_nomad::client::DEFAULT_PAGE_PATH;
 use reticula_nomad::{NomadClient, NomadEvent, Page};
 use reticula_ui::context::{
@@ -709,9 +708,9 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
             LxmfEvent::PeerDisconnected(_) => {
                 self.shared.peer_links.fetch_sub(1, Ordering::Relaxed);
             }
-            LxmfEvent::Delivered(_) => {
-                // A sent message has been confirmed by the recipient; redraw
-                // so it stops being shown as still sending.
+            LxmfEvent::Acknowledged(_) => {
+                // The peer acknowledged the bytes; redraw so the message stops
+                // being shown as pending.
                 self.refresh_messages();
             }
             LxmfEvent::Undeliverable { message_id, reason } => {
@@ -821,7 +820,7 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
             .iter()
             .map(|m| ChatMessage {
                 incoming: m.incoming,
-                sending: !m.incoming && m.delivery == Delivery::Sending,
+                unacknowledged: !m.incoming && m.delivery == Delivery::Pending,
                 title: m.title_string(),
                 content: m.content_string(),
                 ts: m.timestamp,

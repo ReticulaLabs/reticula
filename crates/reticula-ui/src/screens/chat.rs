@@ -136,7 +136,7 @@ impl ChatScreen {
         let mut rows: Vec<(bool, bool, String)> = Vec::new();
         for msg in ctx.messages {
             for line in widgets::wrap(&msg.content, max_chars) {
-                rows.push((msg.incoming, msg.sending, line));
+                rows.push((msg.incoming, msg.unacknowledged, line));
             }
             if !rows.is_empty() {
                 rows.push((false, false, String::new())); // spacer
@@ -155,7 +155,7 @@ impl ChatScreen {
 
         let mut y = body.top_left.y;
         let mut row = 0usize;
-        for (i, (incoming, sending, line)) in rows.iter().enumerate() {
+        for (i, (incoming, unacknowledged, line)) in rows.iter().enumerate() {
             if i < self.scroll {
                 continue;
             }
@@ -174,17 +174,17 @@ impl ChatScreen {
                     widgets::draw_text(target, Point::new(4, y), line, theme.text, theme).ok();
                 } else {
                     // Sent messages sit on the right, with a right accent bar.
-                    // Until the recipient's delivery proof arrives they are
+                    // Until the peer's link layer acknowledges them they are
                     // drawn in the warning colour: the bytes are out, but
                     // nothing has confirmed they landed.
-                    let color = if *sending { theme.warning } else { theme.text };
+                    let color = if *unacknowledged { theme.warning } else { theme.text };
                     let text_w = line.chars().count() as i32 * theme.char_w;
                     let x = (width - 5 - text_w).max(4);
                     widgets::draw_text(target, Point::new(x, y), line, color, theme).ok();
                     widgets::fill_rect(
                         target,
                         Rectangle::new(Point::new(width - 2, y), px(2, theme.line_h)),
-                        if *sending { theme.warning } else { theme.accent },
+                        if *unacknowledged { theme.warning } else { theme.accent },
                     )
                     .ok();
                 }
@@ -352,10 +352,10 @@ mod tests {
         }
     }
 
-    fn outbound(sending: bool, content: &str) -> ChatMessage {
+    fn outbound(unacknowledged: bool, content: &str) -> ChatMessage {
         ChatMessage {
             incoming: false,
-            sending,
+            unacknowledged,
             title: String::new(),
             content: content.to_string(),
             ts: 0.0,
@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn unconfirmed_outgoing_message_renders_in_the_warning_colour() {
+    fn unacknowledged_outgoing_message_renders_in_the_warning_colour() {
         let theme = Theme::default();
         let messages = [outbound(true, "pending message")];
         let mut target = Recorder::new(320, 240);
@@ -371,18 +371,18 @@ mod tests {
 
         assert!(
             target.contains(theme.warning),
-            "a message still awaiting its delivery proof must be drawn amber"
+            "a message still awaiting the peer's acknowledgement must be drawn amber"
         );
         // Scoped to the message body: the composer's "Type a message…"
         // placeholder is drawn in the normal text colour regardless.
         assert!(
             !target.contains_in_body(theme.text, &theme),
-            "an unconfirmed message must not be drawn in the normal text colour"
+            "an unacknowledged message must not be drawn in the normal text colour"
         );
     }
 
     #[test]
-    fn confirmed_outgoing_message_is_not_amber() {
+    fn acknowledged_outgoing_message_is_not_amber() {
         let theme = Theme::default();
         let messages = [outbound(false, "confirmed message")];
         let mut target = Recorder::new(320, 240);

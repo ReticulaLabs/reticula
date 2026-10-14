@@ -34,18 +34,25 @@ pub const SIGNATURE_LENGTH: usize = 64;
 /// Length of a full SHA-256 hash.
 pub const HASH_LENGTH: usize = 32;
 
-/// Delivery state of a message.
+/// Acknowledgement state of a message.
 ///
 /// Handing bytes to the transport is not the same as the message having
-/// arrived: an out-link can go away after the packet is written. The recipient
-/// proves every message it accepts over a link, so a message is only
-/// [`Delivery::Delivered`] once that proof has actually been seen.
+/// arrived, and neither is the same as the recipient having *displayed* it.
+/// A recipient proves every packet it accepts over a link, but that proof is
+/// issued by the link layer as soon as the packet decrypts — before, and
+/// independently of, the receiving application's own handling of the payload.
+/// So an acknowledgement here means "the peer's delivery destination took
+/// delivery of these bytes", and nothing more.
+///
+/// In particular a message can be acknowledged and still be discarded by the
+/// peer: unparseable, a duplicate, on an ignore list, or simply dropped by an
+/// application that registered no delivery callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
-    /// Sent, but not yet confirmed by the recipient.
-    Sending,
-    /// Confirmed by the recipient's link-layer proof.
-    Delivered,
+    /// Handed to the transport; the peer's acknowledgement has not arrived.
+    Pending,
+    /// The peer's link layer returned a proof for the packet.
+    Acknowledged,
 }
 
 /// An LXMF message.
@@ -74,8 +81,8 @@ pub struct LxmfMessage {
     pub signature_validated: bool,
     /// Whether this message was received (as opposed to locally created).
     pub incoming: bool,
-    /// Whether the message has been confirmed by its recipient. Only
-    /// meaningful for outgoing messages.
+    /// Whether the message has been acknowledged by its recipient's link
+    /// layer. Only meaningful for outgoing messages.
     pub delivery: Delivery,
 }
 
@@ -103,8 +110,8 @@ impl LxmfMessage {
             signature: [0u8; SIGNATURE_LENGTH],
             signature_validated: false,
             incoming: false,
-            // Locally created: nothing has confirmed it yet.
-            delivery: Delivery::Sending,
+            // Locally created: nothing has acknowledged it yet.
+            delivery: Delivery::Pending,
         }
     }
 
@@ -220,7 +227,7 @@ impl LxmfMessage {
             signature_validated,
             incoming: true,
             // Received, so it demonstrably arrived; there is nothing pending.
-            delivery: Delivery::Delivered,
+            delivery: Delivery::Acknowledged,
         })
     }
 
