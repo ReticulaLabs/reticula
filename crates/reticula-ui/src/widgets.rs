@@ -197,7 +197,7 @@ pub fn draw_header<D>(
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let height = theme.line_h;
+    let height = theme.header_h;
     let header = Rectangle::new(Point::new(0, 0), px(width, height));
     fill_rect(target, header, theme.header)?;
     // 1-px underline separates the header from the body below it.
@@ -206,7 +206,21 @@ where
         Rectangle::new(Point::new(0, height - 1), px(width, 1)),
         theme.border,
     )?;
-    draw_text(target, Point::new(0, 0), title, theme.header_text, theme)?;
+
+    // The bar is taller than a text line so the icons have room, so both the
+    // title and the glyphs are centred vertically rather than pinned to the
+    // top — otherwise they sit at different heights and the bar looks lopsided.
+    let text_y = (height - theme.line_h) / 2;
+    // Icon glyphs span roughly 9px; centre those too.
+    let icon_y = (height - 9) / 2;
+
+    draw_text(
+        target,
+        Point::new(0, text_y),
+        title,
+        theme.header_text,
+        theme,
+    )?;
 
     let cw = theme.char_w;
 
@@ -216,7 +230,7 @@ where
     let lora_color = if lora_online { theme.ok } else { theme.danger };
     let lora_icon_w = 5;
     let lora_x = width - 2 - lora_icon_w;
-    draw_lora_icon(target, Point::new(lora_x, 1), lora_online, lora_color)?;
+    draw_lora_icon(target, Point::new(lora_x, icon_y), lora_online, lora_color)?;
 
     // WiFi icon (left of LoRa): a signal fan, green when online, red when
     // offline.
@@ -234,7 +248,7 @@ where
     let wifi_color = if wifi_online { theme.ok } else { theme.danger };
     let wifi_icon_w = 13;
     let wifi_x = lora_x - 2 - wifi_icon_w;
-    draw_wifi_icon(target, Point::new(wifi_x, 1), wifi_level, wifi_color)?;
+    draw_wifi_icon(target, Point::new(wifi_x, icon_y), wifi_level, wifi_color)?;
 
     // A solid red line under the WiFi or LoRa icon marks the interface the
     // currently shown destination is available via. Drawn at the header's
@@ -264,7 +278,7 @@ where
         let rl_x = wifi_x - 2 - (trimmed.chars().count() as i32) * cw;
         draw_text(
             target,
-            Point::new(rl_x, 0),
+            Point::new(rl_x, text_y),
             &trimmed,
             theme.header_text,
             theme,
@@ -395,8 +409,8 @@ const MENU_REFERENCE_ROWS: i32 = 4;
 /// [`MENU_REFERENCE_ROWS`] entries; a longer list is squeezed to fit rather than
 /// allowed to run off the bottom of the screen.
 pub fn menu_row_height(height: i32, theme: &Theme, item_count: usize) -> i32 {
-    // Room between the header/status band and the footer bar.
-    let available = (height - theme.line_h * 2 - theme.line_h).max(theme.line_h);
+    // Room between the bottom of the status band and the footer bar.
+    let available = (height - body_top(theme) - theme.line_h).max(theme.line_h);
     let preferred = height / (MENU_REFERENCE_ROWS + 2);
     let per_item = available / item_count.max(1) as i32;
 
@@ -405,6 +419,11 @@ pub fn menu_row_height(height: i32, theme: &Theme, item_count: usize) -> i32 {
     // a row with less padding. The `max(1)` only guards against a degenerate
     // zero-height display.
     preferred.min(per_item).max(1)
+}
+
+/// Top of a menu body: below the status bar and its status line.
+pub fn body_top(theme: &Theme) -> i32 {
+    theme.header_h + theme.line_h
 }
 
 /// Draw a full-width menu list starting at `top`, and return the y coordinate
@@ -988,12 +1007,7 @@ mod tests {
 mod layout_tests {
     use super::*;
 
-    use crate::theme::{Theme, DISPLAY_H, DISPLAY_W};
-
-    /// Top of the menu list: below the header and status band.
-    fn top() -> i32 {
-        Theme::default().line_h * 2
-    }
+    use crate::theme::{Theme, DISPLAY_H, DISPLAY_W, HEADER_EXTRA_H};
 
     /// Both menus must use the same row height, so they look identical
     /// regardless of how many entries each has.
@@ -1008,6 +1022,37 @@ mod layout_tests {
         );
     }
 
+    /// The status bar is one text line plus the extra room the icons need.
+    #[test]
+    fn the_status_bar_is_five_px_taller_than_a_text_line() {
+        let theme = Theme::default();
+        assert_eq!(
+            theme.header_h,
+            theme.line_h + HEADER_EXTRA_H,
+            "the bar should be one text line plus HEADER_EXTRA_H"
+        );
+        assert_eq!(HEADER_EXTRA_H, 5, "the bar was asked to grow by 5px");
+        assert_eq!(theme.header_h, 15);
+    }
+
+    /// The bar must be tall enough for the icon glyphs plus the underline that
+    /// marks the current interface, with something to spare either side.
+    #[test]
+    fn the_status_bar_fits_its_icons() {
+        let theme = Theme::default();
+        // Glyphs are ~9px tall; the underline sits on the last row of the bar.
+        assert!(
+            theme.header_h >= 9 + 2,
+            "bar {} is too short for a 9px icon plus the underline",
+            theme.header_h
+        );
+        // Body content must start below the bar, not under it.
+        assert!(
+            body_top(&theme) > theme.header_h,
+            "body content must clear the status bar"
+        );
+    }
+
     /// A list must never run into the footer bar, whatever its length. This is
     /// the regression the settings menu hit when it gained its fifth entry.
     #[test]
@@ -1015,7 +1060,7 @@ mod layout_tests {
         let theme = Theme::default();
         for count in 1..=12 {
             let row_h = menu_row_height(DISPLAY_H, &theme, count);
-            let bottom = top() + row_h * count as i32;
+            let bottom = body_top(&theme) + row_h * count as i32;
             assert!(
                 bottom <= DISPLAY_H - theme.line_h,
                 "{count} items overflow: rows end at {bottom}, footer starts at {}",
@@ -1029,7 +1074,7 @@ mod layout_tests {
     #[test]
     fn rows_are_never_shorter_than_their_content() {
         let theme = Theme::default();
-        let available = DISPLAY_H - theme.line_h * 2 - theme.line_h;
+        let available = DISPLAY_H - body_top(&theme) - theme.line_h;
 
         for count in 1..=12 {
             let row_h = menu_row_height(DISPLAY_H, &theme, count);
@@ -1053,12 +1098,18 @@ mod layout_tests {
     fn row_geometry_matches_the_panel() {
         let theme = Theme::default();
         let row_h = menu_row_height(DISPLAY_H, &theme, 5);
+        let bottom = body_top(&theme) + row_h * 5;
+
+        assert_eq!(body_top(&theme), 25, "bar 15 + status line 10");
         assert_eq!(
-            (row_h, top() + row_h * 5),
-            (40, 220),
-            "5 settings rows should be 40px each, ending at y=220 with the footer at 230"
+            (row_h, bottom),
+            (40, 225),
+            "5 settings rows should be 40px each, ending at y=225 with the footer at 230"
         );
-        assert!(220 <= DISPLAY_H - theme.line_h);
+        assert!(
+            bottom <= DISPLAY_H - theme.line_h,
+            "the last row must stay clear of the footer"
+        );
     }
 
     /// A tiny display must still produce a usable row height rather than

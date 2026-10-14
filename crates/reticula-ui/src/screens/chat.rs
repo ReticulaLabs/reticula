@@ -129,7 +129,7 @@ impl ChatScreen {
         let right_label = widgets::hops_label(hops);
         widgets::draw_header(target, width, &title, &right_label, &ctx.network, theme).ok();
 
-        let body_top = theme.line_h;
+        let body_top = theme.header_h;
         let composer_y = height - theme.line_h;
         let status_y = composer_y - theme.line_h;
         let body = Rectangle::new(Point::new(0, body_top), px(width, status_y - body_top));

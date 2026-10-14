@@ -59,7 +59,7 @@ impl NewChatScreen {
 
         widgets::draw_header(target, width, "New message", "", &ctx.network, theme).ok();
 
-        let mut y = theme.line_h;
+        let mut y = theme.header_h;
 
         widgets::draw_text(
             target,

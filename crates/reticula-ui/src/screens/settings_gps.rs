@@ -73,7 +73,7 @@ impl SettingsGpsScreen {
 
         widgets::draw_header(target, width, "GPS", "", &ctx.network, theme).ok();
 
-        let mut y = theme.line_h;
+        let mut y = theme.header_h;
 
         // What the receiver is for, and why it matters even with no fix.
         widgets::draw_text(

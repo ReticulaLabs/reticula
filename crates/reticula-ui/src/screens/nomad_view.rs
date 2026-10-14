@@ -76,7 +76,7 @@ impl NomadViewScreen {
         let right_label = widgets::hops_label(ctx.page_node.and_then(|n| n.hops));
         widgets::draw_header(target, width, &title, &right_label, &ctx.network, theme).ok();
 
-        let body_top = theme.line_h;
+        let body_top = theme.header_h;
         let body = Rectangle::new(
             Point::new(0, body_top),
             px(width, height - body_top - theme.line_h),

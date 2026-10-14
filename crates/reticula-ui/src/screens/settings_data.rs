@@ -50,7 +50,7 @@ impl SettingsDataScreen {
 
         widgets::draw_header(target, width, "Data Management", "", &ctx.network, theme).ok();
 
-        let mut y = theme.line_h;
+        let mut y = theme.header_h;
 
         // Warning about the consequences of regenerating the identity.
         widgets::draw_text(

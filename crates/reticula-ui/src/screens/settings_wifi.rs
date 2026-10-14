@@ -136,7 +136,7 @@ impl SettingsWifiScreen {
 
         widgets::draw_header(target, width, "WiFi", "", &ctx.network, theme).ok();
 
-        let mut y = theme.line_h;
+        let mut y = theme.header_h;
 
         // Current configuration / status.
         let status = if !self.enabled {

@@ -212,7 +212,7 @@ impl SettingsSystemScreen {
 
         widgets::draw_header(target, width, "System", "", &ctx.network, theme).ok();
 
-        let mut y = theme.line_h;
+        let mut y = theme.header_h;
 
         // Current time, and a loud flag when it is not believable.
         match ctx.system_time {

@@ -96,7 +96,7 @@ impl NomadListScreen {
         );
         widgets::draw_header(target, width, "NomadNet", &right_label, &ctx.network, theme).ok();
 
-        let header_h = theme.line_h;
+        let header_h = theme.header_h;
         let search_h = if self.filter.is_empty() { 0 } else { theme.line_h };
         let body_top = header_h + search_h;
         let visible = theme.lines_fit(height - body_top - theme.line_h);

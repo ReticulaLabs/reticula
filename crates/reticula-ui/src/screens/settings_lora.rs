@@ -155,7 +155,7 @@ impl SettingsLoraScreen {
 
         widgets::draw_header(target, width, "LoRa", "", &ctx.network, theme).ok();
 
-        let mut y = theme.line_h;
+        let mut y = theme.header_h;
 
         let status = if self.enabled {
             "Radio: enabled"

@@ -11,6 +11,14 @@ pub const CHAR_W: i32 = 6;
 /// Height of one line of glyphs in pixels.
 pub const LINE_H: i32 = 10;
 
+/// Extra height the top status bar gets beyond one text line.
+///
+/// The bar carries the title plus the WiFi/LoRa icons. Those glyphs are taller
+/// than a text line, so a bar sized exactly to the text crowds them; the extra
+/// pixels make the icons — and their "current interface" underline — readable at
+/// a glance.
+pub const HEADER_EXTRA_H: i32 = 5;
+
 /// Standard 320×240 display (the T-Deck LCD in landscape).
 pub const DISPLAY_W: i32 = 320;
 pub const DISPLAY_H: i32 = 240;
@@ -34,6 +42,8 @@ pub struct Theme {
     pub font: &'static MonoFont<'static>,
     pub char_w: i32,
     pub line_h: i32,
+    /// Height of the top status bar. Every screen starts its body here.
+    pub header_h: i32,
 }
 
 impl Default for Theme {
@@ -56,6 +66,7 @@ impl Default for Theme {
             font: FONT,
             char_w: CHAR_W,
             line_h: LINE_H,
+            header_h: LINE_H + HEADER_EXTRA_H,
         }
     }
 }

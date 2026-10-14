@@ -104,15 +104,16 @@ impl SettingsScreen {
         let status_line = widgets::truncate(&status_line, theme.chars_per_line(width - 6));
         widgets::draw_text(
             target,
-            Point::new(6, theme.line_h),
+            Point::new(6, theme.header_h),
             &status_line,
             theme.text_dim,
             theme,
         )
         .ok();
+        let body_top = widgets::body_top(theme);
         widgets::fill_rect(
             target,
-            Rectangle::new(Point::new(0, theme.line_h * 2), px(width, 1)),
+            Rectangle::new(Point::new(0, body_top), px(width, 1)),
             theme.border,
         )
         .ok();
@@ -123,7 +124,7 @@ impl SettingsScreen {
             target,
             width,
             height,
-            theme.line_h * 2,
+            body_top,
             &Self::ITEMS,
             self.state.selected,
             theme,
