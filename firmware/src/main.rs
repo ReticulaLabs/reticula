@@ -304,23 +304,37 @@ let lora = match lora_settings {
         })
     });
 
-    let transport = match peer {
-        Some((addr, PeerProtocol::Tcp)) => {
-            log::info!("reticulum: TCP peer {addr}");
-            TransportKind::TcpPeer { addr }
+    // The peer interface needs an IP path, and WiFi is the only one this board
+    // has — there is no Ethernet wiring. With WiFi disabled there is nothing
+    // for it to connect over, so configuring it anyway would spawn a TCP
+    // client that retries a connection forever and can never succeed: pure
+    // wake-up cost and log noise, and it changes nothing about what the device
+    // can reach. LoRa still works, so the transport is simply left without an
+    // IP interface rather than with a broken one.
+    let transport = if !wifi_enabled {
+        if peer.is_some() {
+            log::info!("reticulum: WiFi disabled, not configuring the peer interface");
         }
-        Some((addr, PeerProtocol::Udp)) => {
-            log::info!("reticulum: UDP peer {addr}");
-            TransportKind::Udp {
-                bind: "0.0.0.0:5238".to_string(),
-                forward: Some(addr),
+        TransportKind::None
+    } else {
+        match peer {
+            Some((addr, PeerProtocol::Tcp)) => {
+                log::info!("reticulum: TCP peer {addr}");
+                TransportKind::TcpPeer { addr }
             }
-        }
-        None => {
-            log::info!("reticulum: no remote peer, listening on UDP");
-            TransportKind::Udp {
-                bind: "0.0.0.0:5238".to_string(),
-                forward: None,
+            Some((addr, PeerProtocol::Udp)) => {
+                log::info!("reticulum: UDP peer {addr}");
+                TransportKind::Udp {
+                    bind: "0.0.0.0:5238".to_string(),
+                    forward: Some(addr),
+                }
+            }
+            None => {
+                log::info!("reticulum: no remote peer, listening on UDP");
+                TransportKind::Udp {
+                    bind: "0.0.0.0:5238".to_string(),
+                    forward: None,
+                }
             }
         }
     };
