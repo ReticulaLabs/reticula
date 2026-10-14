@@ -8,6 +8,7 @@ use std::time::Instant;
 use log::{debug, info, trace, warn};
 use rmpv::Value;
 use sha2::Digest;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, Mutex};
 use tokio::time::{timeout, Duration};
 
@@ -17,7 +18,7 @@ use reticulum_sdk::hash::{AddressHash, Hash};
 use reticulum_sdk::identity::{HashIdentity, PrivateIdentity};
 use reticulum_sdk::transport::{AnnounceEvent, ReceivedData, Transport};
 
-use crate::message::LxmfMessage;
+use crate::message::{Delivery, LxmfMessage};
 use crate::store::{Direction, MessageStore};
 use crate::LxmfError;
 
@@ -27,10 +28,74 @@ pub const APP_NAME: &str = "lxmf";
 pub const DELIVERY_ASPECT: &str = "delivery";
 /// How long to wait for a link to a peer to activate before giving up.
 pub const LINK_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often the link status is re-read while waiting for a link to activate.
+///
+/// The wait must not rely on the `Activated` broadcast alone: the transport
+/// can activate the link in the window between `ensure_link` returning and
+/// this waiter subscribing, and a broadcast receiver only ever sees messages
+/// sent after it subscribed. Polling mirrors the Nomad client's
+/// `wait_for_link_active` and closes that race.
+pub const LINK_ACTIVATION_POLL: Duration = Duration::from_millis(100);
 /// How long to wait for a path request to re-install a destination that the
 /// transport pruned (the `embedded` build expires destinations 120s after
 /// their last announce) before giving up on the send.
 pub const PATH_REDISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// How many times a single user-visible send is attempted before it is
+/// reported as failed.
+///
+/// A message is only meaningful once it reaches the mesh, and the common
+/// failure modes (a link that lost a proof, a path that expired mid-flight)
+/// are all resolved by simply establishing a fresh link, so retrying is far
+/// better than dropping the message on the floor.
+pub const SEND_ATTEMPTS: usize = 3;
+/// Pause between send attempts.
+pub const SEND_RETRY_DELAY: Duration = Duration::from_secs(5);
+/// How long a sent message is tracked waiting for its delivery proof before
+/// the pending entry is discarded.
+///
+/// Bounds the pending-proof map for a peer that never answers: a message can
+/// only be in this state for as long as its link survived anyway.
+pub const PENDING_PROOF_TTL: Duration = Duration::from_secs(300);
+
+/// How a peer was observed to be reachable.
+#[derive(Debug, Clone, Copy)]
+pub struct PeerReachability {
+    /// Interface the peer was seen on.
+    pub iface: AddressHash,
+    /// Link the observation came from, so it can be invalidated when that
+    /// link closes.
+    pub link_id: LinkId,
+}
+
+/// Record how `peer` was seen reachable over `iface`.
+///
+/// `own_address` is this client's own delivery address. A link activation whose
+/// address is that one is an *in*-link: the SDK fills the event's address from
+/// the link's destination, which for an in-link is our own destination rather
+/// than the remote. Recording it would file this client as its own peer, so it
+/// is ignored — an in-link's peer is not known until a message arrives on it,
+/// and [`record_reachability`] is then called with the message source hash.
+fn record_reachability(
+    peers: &mut HashMap<AddressHash, PeerReachability>,
+    peer: AddressHash,
+    own_address: &AddressHash,
+    iface: AddressHash,
+    link_id: LinkId,
+) {
+    if &peer == own_address {
+        return;
+    }
+    peers.insert(peer, PeerReachability { iface, link_id });
+}
+
+/// Forget every peer whose reachability was observed through `link_id`.
+///
+/// Without this the map is a latch: an entry written once would outlive the
+/// link that produced it, and the UI would keep reporting the peer as
+/// reachable over an interface it is no longer on.
+fn forget_link(peers: &mut HashMap<AddressHash, PeerReachability>, link_id: LinkId) {
+    peers.retain(|_, reach| reach.link_id != link_id);
+}
 
 /// Events the LXMF client emits to the rest of the application.
 #[derive(Debug, Clone)]
@@ -70,10 +135,18 @@ pub struct LxmfClient {
     /// Outbound links we established per peer, keyed by peer address hash.
     links: Mutex<HashMap<AddressHash, LinkId>>,
     /// The interface each peer was last seen reachable over, keyed by peer
-    /// address hash. Populated from the interface id carried on link events.
-    peer_ifaces: std::sync::Mutex<HashMap<AddressHash, AddressHash>>,
+    /// address hash. Populated from the interface id carried on link events,
+    /// together with the link the observation came from, so the mapping can be
+    /// dropped when that link goes away. Without the link id this map is a
+    /// latch: an entry recorded once would survive every disconnect and still
+    /// claim the peer is reachable over an interface it is no longer on.
+    peer_ifaces: std::sync::Mutex<HashMap<AddressHash, PeerReachability>>,
     /// LXMF delivery destinations discovered from announces, in discovery order.
     discovered: Mutex<Vec<AddressHash>>,
+    /// Messages that were handed to the transport but not yet confirmed,
+    /// keyed by the transport packet hash whose proof will confirm them, with
+    /// the time the entry was created so unanswered entries can be pruned.
+    pending_proofs: Mutex<HashMap<Hash, ([u8; 32], Instant)>>,
     /// Hashes of recently received messages. The reference implementation keeps
     /// a "locally delivered" cache and ignores already-received messages; a
     /// sender that retransmits an unconfirmed message must not surface as a
@@ -108,6 +181,7 @@ impl LxmfClient {
             links: Mutex::new(HashMap::new()),
             peer_ifaces: std::sync::Mutex::new(HashMap::new()),
             discovered: Mutex::new(Vec::new()),
+            pending_proofs: Mutex::new(HashMap::new()),
             seen: Mutex::new(VecDeque::new()),
         }
     }
@@ -153,8 +227,11 @@ impl LxmfClient {
     }
 
     /// The interface `peer` was last seen reachable over, if known.
+    ///
+    /// `None` means there is no live link to that peer right now; the entry is
+    /// removed when the link it was observed on closes.
     pub fn peer_interface(&self, peer: AddressHash) -> Option<AddressHash> {
-        self.peer_ifaces.lock().unwrap().get(&peer).copied()
+        self.peer_ifaces.lock().unwrap().get(&peer).map(|r| r.iface)
     }
 
     /// The address hash of the `lxmf/delivery` destination that `identity`
@@ -217,6 +294,10 @@ impl LxmfClient {
     ///
     /// Establishes (or reuses) a direct link to the recipient and transmits
     /// the packed message over it. Returns the message hash on success.
+    ///
+    /// The transfer is retried [`SEND_ATTEMPTS`] times, each attempt from a
+    /// fresh link, so a link that lost its proof or a path that expired
+    /// mid-flight does not silently swallow the message.
     pub async fn send(
         &self,
         destination_hash: [u8; 16],
@@ -235,12 +316,33 @@ impl LxmfClient {
         );
         let packed = message.pack(&self.identity)?;
         let hash = message.hash;
+        let peer = AddressHash::new(destination_hash);
 
-        self.send_packed(destination_hash, packed).await?;
+        let mut last_error = None;
+        for attempt in 1..=SEND_ATTEMPTS {
+            match self.send_packed(destination_hash, packed.clone()).await {
+                Ok(packet_hash) => {
+                    let stored = self.store.lock().unwrap().push(message, Direction::Outbound);
+                    self.track_pending_proof(packet_hash, hash).await;
+                    let _ = self.events.send(LxmfEvent::MessageSent(stored));
+                    return Ok(hash);
+                }
+                Err(e) => {
+                    warn!("lxmf: send to {peer} failed (attempt {attempt}/{SEND_ATTEMPTS}): {e}");
+                    last_error = Some(e);
+                    // The cached link for this peer is suspect (closed, stale,
+                    // or never established); drop it so the next attempt
+                    // builds a fresh one instead of waiting on a dead link.
+                    self.links.lock().await.remove(&peer);
+                    if attempt < SEND_ATTEMPTS {
+                        tokio::time::sleep(SEND_RETRY_DELAY).await;
+                    }
+                }
+            }
+        }
 
-        let stored = self.store.lock().unwrap().push(message, Direction::Outbound);
-        let _ = self.events.send(LxmfEvent::MessageSent(stored));
-        Ok(hash)
+        info!("lxmf: giving up sending to {peer} after {SEND_ATTEMPTS} attempts");
+        Err(last_error.expect("at least one attempt was made"))
     }
 
     /// The long-running event loop. Spawn this on the tokio runtime.
@@ -274,49 +376,79 @@ impl LxmfClient {
     }
 
     /// Transmit a packed LXMF message to a peer.
-    async fn send_packed(&self, destination_hash: [u8; 16], packed: Vec<u8>) -> Result<(), LxmfError> {
+    ///
+    /// Returns the transport packet hash, which is what the recipient's
+    /// link-layer proof will be issued against — the handle used to tell
+    /// "handed to the transport" apart from "confirmed delivered".
+    async fn send_packed(
+        &self,
+        destination_hash: [u8; 16],
+        packed: Vec<u8>,
+    ) -> Result<Hash, LxmfError> {
         let peer = AddressHash::new(destination_hash);
         let link_id = self.ensure_link(peer).await?;
 
-        // Fast path: the link is already active.
-        if let Some(link) = self.transport.find_out_link(&link_id).await {
-            if link.lock().await.status() == LinkStatus::Active {
-                let packet = link.lock().await.data_packet(&packed)?;
-                self.transport.send_packet(packet).await;
-                trace!("lxmf: sent {} bytes over active link {}", packed.len(), link_id);
-                return Ok(());
-            }
-        }
-
-        // Otherwise wait for the link to activate (or close/time out).
         let transport = self.transport.clone();
         timeout(LINK_ACTIVATION_TIMEOUT, async move {
             let mut out_links = transport.out_link_events();
             loop {
-                let ev = out_links.recv().await.map_err(|_| LxmfError::LinkClosed)?;
-                if ev.id != link_id {
-                    continue;
-                }
-                match ev.event {
-                    LinkEvent::Activated => {
+                // Re-read the shared link state on every pass rather than
+                // relying on the `Activated` broadcast alone. The transport
+                // updates the `Link` object as it processes the proof, and it
+                // can do so in the window between `ensure_link` returning and
+                // this task subscribing to `out_link_events()` — a receiver
+                // created after an event was broadcast never sees that event,
+                // so without this check a link that came up quickly would sit
+                // here until the timeout and the message would be lost.
+                //
+                // The status is read into a local first: temporaries in a
+                // scrutinee expression live until the end of the whole
+                // `match`, so locking the link again inside an arm would
+                // deadlock on the link's own mutex and wedge every task that
+                // needs that link.
+                let status = match transport.find_out_link(&link_id).await {
+                    Some(link) => link.lock().await.status(),
+                    None => return Err(LxmfError::LinkLost),
+                };
+                match status {
+                    LinkStatus::Active => {
                         let link = transport
                             .find_out_link(&link_id)
                             .await
                             .ok_or(LxmfError::LinkLost)?;
                         let packet = link.lock().await.data_packet(&packed)?;
+                        let packet_hash = packet.hash();
                         transport.send_packet(packet).await;
-                        trace!("lxmf: sent {} bytes over newly active link {}", packed.len(), link_id);
-                        return Ok(());
+                        trace!(
+                            "lxmf: sent {} bytes over link {link_id} as {packet_hash}",
+                            packed.len()
+                        );
+                        return Ok(packet_hash);
                     }
-                    LinkEvent::Closed => return Err(LxmfError::LinkClosed),
+                    LinkStatus::Closed => return Err(LxmfError::LinkClosed),
+                    // Pending/Handshake/Stale: keep waiting for the proof.
                     _ => {}
+                }
+
+                tokio::select! {
+                    ev = out_links.recv() => match ev {
+                        Ok(ev) => {
+                            if ev.id == link_id && matches!(ev.event, LinkEvent::Closed) {
+                                return Err(LxmfError::LinkClosed);
+                            }
+                        }
+                        // Events were dropped, not lost: the link is still the
+                        // authority on its state. Aborting here would turn a
+                        // momentarily busy event channel into a lost message.
+                        Err(RecvError::Lagged(_)) => {}
+                        Err(RecvError::Closed) => return Err(LxmfError::LinkClosed),
+                    },
+                    _ = tokio::time::sleep(LINK_ACTIVATION_POLL) => {}
                 }
             }
         })
         .await
-        .map_err(|_| LxmfError::SendTimeout)??;
-
-        Ok(())
+        .map_err(|_| LxmfError::SendTimeout)?
     }
 
     /// Ensure an outbound link to `peer` exists; create one if needed.
@@ -325,11 +457,19 @@ impl LxmfClient {
         // closed (or whose `Closed` event was missed) must not be reused:
         // `send_packed` would otherwise wait out `LINK_ACTIVATION_TIMEOUT` on
         // a dead link for every message instead of establishing a fresh one.
-        if let Some(&link_id) = self.links.lock().await.get(&peer) {
+        //
+        // The cached id is copied out and the guard dropped before anything
+        // else runs: the temporary guard in an `if let` scrutinee lives until
+        // the end of the whole `if let`, so locking again inside the body
+        // would deadlock on this non-reentrant mutex — permanently wedging
+        // every send and link-event handler for this peer.
+        let cached = { self.links.lock().await.get(&peer).copied() };
+        if let Some(link_id) = cached {
             if self.link_is_active(&link_id).await {
                 return Ok(link_id);
             }
             self.links.lock().await.remove(&peer);
+            debug!("lxmf: cached link {link_id} to {peer} is dead, re-establishing");
         }
 
         // The transport prunes its destination cache aggressively on embedded
@@ -342,14 +482,17 @@ impl LxmfClient {
         let desc = match self.transport.get_out_destination(&peer).await {
             Some(dest) => dest.lock().await.desc,
             None => {
+                info!("lxmf: no known path to {peer}, requesting one");
                 self.transport.request_path(&peer, None, None).await;
                 let deadline = Instant::now() + PATH_REDISCOVERY_TIMEOUT;
                 loop {
                     tokio::time::sleep(Duration::from_millis(250)).await;
                     if let Some(dest) = self.transport.get_out_destination(&peer).await {
+                        info!("lxmf: path to {peer} rediscovered");
                         break dest.lock().await.desc;
                     }
                     if Instant::now() >= deadline {
+                        info!("lxmf: still no path to {peer} after {PATH_REDISCOVERY_TIMEOUT:?}");
                         return Err(LxmfError::NoPathToDestination(
                             peer.as_slice().try_into().unwrap(),
                         ));
@@ -378,6 +521,36 @@ impl LxmfClient {
         }
     }
 
+    /// Remember that `packet_hash` is awaiting a delivery proof for
+    /// `message_hash`.
+    ///
+    /// Entries for proofs that never arrive are pruned after
+    /// [`PENDING_PROOF_TTL`], so a peer that silently drops messages cannot
+    /// grow this map without bound.
+    async fn track_pending_proof(&self, packet_hash: Hash, message_hash: [u8; 32]) {
+        let now = Instant::now();
+        let mut pending = self.pending_proofs.lock().await;
+        pending.retain(|_, (_, tracked)| now.duration_since(*tracked) < PENDING_PROOF_TTL);
+        pending.insert(packet_hash, (message_hash, now));
+    }
+
+    /// Mark a message delivered once its link-layer proof arrives.
+    ///
+    /// The recipient proves every message it accepts over a link, so this is
+    /// the first point at which "the bytes were handed to the transport"
+    /// becomes "the message was actually received".
+    async fn handle_link_proof(&self, packet_hash: Hash) {
+        let Some((message_hash, _)) = self.pending_proofs.lock().await.remove(&packet_hash) else {
+            // Proofs also cover keepalives and other traffic; only the ones we
+            // are waiting on are interesting.
+            return;
+        };
+        if self.store.lock().unwrap().set_delivery(message_hash, Delivery::Delivered) {
+            debug!("lxmf: delivery confirmed for {message_hash:02x?}");
+            let _ = self.events.send(LxmfEvent::Delivered(message_hash));
+        }
+    }
+
     /// Handle an incoming link event (inbound or outbound).
     async fn handle_link_event(&self, ev: LinkEventData) {
         match ev.event {
@@ -385,19 +558,41 @@ impl LxmfClient {
                 self.handle_link_data(ev.id, ev.iface, payload.as_slice()).await;
             }
             LinkEvent::Activated => {
-                // The link event now carries the interface the link is carried
-                // on; record it so the UI can show how a peer is reachable.
+                // The link event carries the interface the link is carried on,
+                // so record how the peer is reachable for the UI.
+                //
+                // `address_hash` is the *destination* of the link. For an
+                // out-link that is the remote peer, but for an in-link it is
+                // our own delivery destination — recording that would list us
+                // as our own peer and report a bogus reachability. An in-link
+                // has no peer address until a message arrives on it, so it is
+                // recorded from the message source hash in `handle_link_data`.
                 if let Some(iface) = ev.iface {
-                    self.peer_ifaces.lock().unwrap().insert(ev.address_hash, iface);
+                    let mut peers = self.peer_ifaces.lock().unwrap();
+                    record_reachability(
+                        &mut peers,
+                        ev.address_hash,
+                        &self.delivery_address,
+                        iface,
+                        ev.id,
+                    );
                 }
                 if let Some(peer) = self.peer_for_link(ev.id).await {
                     debug!("lxmf: peer connected: {}", peer);
                     let _ = self.events.send(LxmfEvent::PeerConnected(peer));
                 }
             }
+            LinkEvent::Proof(packet_hash) => {
+                self.handle_link_proof(packet_hash).await;
+            }
             LinkEvent::Closed => {
                 let peer = self.peer_for_link(ev.id).await;
                 self.links.lock().await.retain(|_, id| *id != ev.id);
+                // Drop reachability recorded through this link. For an in-link
+                // the mapping was filed under the remote's address (which the
+                // link event does not carry), so match on the recorded link id
+                // rather than on a peer address.
+                forget_link(&mut self.peer_ifaces.lock().unwrap(), ev.id);
                 if let Some(peer) = peer {
                     let _ = self.events.send(LxmfEvent::PeerDisconnected(peer));
                 }
@@ -407,7 +602,7 @@ impl LxmfClient {
     }
 
     /// Attempt to parse link payload bytes as an LXMF message.
-    async fn handle_link_data(&self, _link_id: LinkId, iface: Option<AddressHash>, payload: &[u8]) {
+    async fn handle_link_data(&self, link_id: LinkId, iface: Option<AddressHash>, payload: &[u8]) {
         debug!("lxmf: link data arrived ({len} bytes)", len = payload.len());
         let Some(message) = self.unpack_message(payload).await else {
             debug!("lxmf: link data could not be unpacked");
@@ -418,10 +613,14 @@ impl LxmfClient {
         // link's destination is our own delivery address, so the peer address
         // comes from the message source).
         if let Some(iface) = iface {
-            self.peer_ifaces
-                .lock()
-                .unwrap()
-                .insert(AddressHash::new(message.source_hash), iface);
+            let mut peers = self.peer_ifaces.lock().unwrap();
+            record_reachability(
+                &mut peers,
+                AddressHash::new(message.source_hash),
+                &self.delivery_address,
+                iface,
+                link_id,
+            );
         }
 
         // Only accept messages addressed to this client's LXMF address.
@@ -576,5 +775,94 @@ fn delivery_name(announce: &AnnounceEvent) -> Option<String> {
         None
     } else {
         Some(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(b: u8) -> AddressHash {
+        AddressHash::new([b; 16])
+    }
+
+    #[test]
+    fn out_link_activation_records_the_peer() {
+        let me = addr(1);
+        let peer = addr(2);
+        let (iface, link) = (addr(9), addr(8));
+
+        let mut peers = HashMap::new();
+        record_reachability(&mut peers, peer, &me, iface, link);
+
+        assert_eq!(peers.get(&peer).unwrap().iface, iface);
+        assert_eq!(peers.get(&peer).unwrap().link_id, link);
+    }
+
+    #[test]
+    fn in_link_activation_does_not_record_us_as_our_own_peer() {
+        // An in-link event carries *our* delivery address as the link
+        // destination. Recording it would make the client list itself as a
+        // reachable peer and show a bogus interface indicator for it.
+        let me = addr(1);
+        let (iface, link) = (addr(9), addr(8));
+
+        let mut peers = HashMap::new();
+        record_reachability(&mut peers, me, &me, iface, link);
+
+        assert!(peers.is_empty(), "in-link activation must not be recorded");
+    }
+
+    #[test]
+    fn closing_a_link_clears_its_reachability() {
+        let me = addr(1);
+        let peer = addr(2);
+        let (iface, link) = (addr(9), addr(8));
+
+        let mut peers = HashMap::new();
+        record_reachability(&mut peers, peer, &me, iface, link);
+        assert!(peers.contains_key(&peer));
+
+        forget_link(&mut peers, link);
+        assert!(!peers.contains_key(&peer), "closed link must not latch");
+    }
+
+    #[test]
+    fn closing_one_link_keeps_other_peers() {
+        let me = addr(1);
+        let a = addr(2);
+        let b = addr(3);
+        let link_a = addr(8);
+        let link_b = addr(7);
+
+        let mut peers = HashMap::new();
+        record_reachability(&mut peers, a, &me, addr(9), link_a);
+        record_reachability(&mut peers, b, &me, addr(10), link_b);
+
+        forget_link(&mut peers, link_a);
+        assert!(!peers.contains_key(&a));
+        assert!(peers.contains_key(&b), "unrelated peer must survive");
+    }
+
+    #[test]
+    fn in_link_peer_is_recorded_from_the_message_source() {
+        // The in-link event itself cannot name the peer; the first message on
+        // it supplies the source hash. That mapping must be attributed to the
+        // in-link so closing the in-link clears it.
+        let me = addr(1);
+        let remote = addr(2);
+        let (iface, link) = (addr(9), addr(8));
+
+        let mut peers = HashMap::new();
+        // Activation on the in-link: address is us, so nothing recorded.
+        record_reachability(&mut peers, me, &me, iface, link);
+        assert!(peers.is_empty());
+
+        // A message arrives: source hash names the real peer.
+        record_reachability(&mut peers, remote, &me, iface, link);
+        assert_eq!(peers.get(&remote).unwrap().link_id, link);
+
+        forget_link(&mut peers, link);
+        assert!(peers.is_empty(), "in-link close must clear its peer too");
     }
 }

@@ -34,6 +34,20 @@ pub const SIGNATURE_LENGTH: usize = 64;
 /// Length of a full SHA-256 hash.
 pub const HASH_LENGTH: usize = 32;
 
+/// Delivery state of a message.
+///
+/// Handing bytes to the transport is not the same as the message having
+/// arrived: an out-link can go away after the packet is written. The recipient
+/// proves every message it accepts over a link, so a message is only
+/// [`Delivery::Delivered`] once that proof has actually been seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// Sent, but not yet confirmed by the recipient.
+    Sending,
+    /// Confirmed by the recipient's link-layer proof.
+    Delivered,
+}
+
 /// An LXMF message.
 ///
 /// Either created locally with [`LxmfMessage::new`] and then [`LxmfMessage::pack`]ed,
@@ -60,6 +74,9 @@ pub struct LxmfMessage {
     pub signature_validated: bool,
     /// Whether this message was received (as opposed to locally created).
     pub incoming: bool,
+    /// Whether the message has been confirmed by its recipient. Only
+    /// meaningful for outgoing messages.
+    pub delivery: Delivery,
 }
 
 impl LxmfMessage {
@@ -86,6 +103,8 @@ impl LxmfMessage {
             signature: [0u8; SIGNATURE_LENGTH],
             signature_validated: false,
             incoming: false,
+            // Locally created: nothing has confirmed it yet.
+            delivery: Delivery::Sending,
         }
     }
 
@@ -200,6 +219,8 @@ impl LxmfMessage {
             signature,
             signature_validated,
             incoming: true,
+            // Received, so it demonstrably arrived; there is nothing pending.
+            delivery: Delivery::Delivered,
         })
     }
 

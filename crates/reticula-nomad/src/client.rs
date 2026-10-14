@@ -242,7 +242,14 @@ impl NomadClient {
     /// Ensure an outbound link to `node` exists.
     async fn ensure_link(&self, node: AddressHash) -> Result<LinkId, NomadError> {
         // Only reuse a link that is not closed.
-        if let Some(&link_id) = self.links.lock().await.get(&node) {
+        //
+        // The cached id is copied out and the guard dropped first: the
+        // temporary guard in an `if let` scrutinee lives until the end of the
+        // whole `if let`, so the `remove()` below would deadlock on this
+        // non-reentrant mutex and wedge every fetch and link-event handler for
+        // this node.
+        let cached = { self.links.lock().await.get(&node).copied() };
+        if let Some(link_id) = cached {
             let still_good = self.link_is_active(&link_id).await;
             if still_good {
                 return Ok(link_id);

@@ -38,6 +38,9 @@ pub struct Theme {
     pub selection_text: Rgb565,
     pub border: Rgb565,
     pub danger: Rgb565,
+    /// Amber: used for work that is in progress but not yet confirmed (a sent
+    /// message still awaiting its delivery proof).
+    pub warning: Rgb565,
     pub ok: Rgb565,
     pub font: &'static MonoFont<'static>,
     pub char_w: i32,
@@ -62,6 +65,7 @@ impl Default for Theme {
             selection_text: Rgb565::new(31, 31, 31),
             border: Rgb565::new(19, 23, 27),
             danger: Rgb565::new(31, 14, 14),
+            warning: Rgb565::new(31, 27, 4),
             ok: Rgb565::new(12, 31, 14),
             font: FONT,
             char_w: CHAR_W,

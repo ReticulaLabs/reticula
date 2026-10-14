@@ -22,11 +22,12 @@ use reticulum_sdk::transport::{Transport, TransportConfig};
 
 use reticula_hal::{Board, Display, Keyboard, KeyCode, KeyEvent, KeyState};
 use reticula_lxmf::client::{delivery_address_for, APP_NAME, DELIVERY_ASPECT};
+use reticula_lxmf::message::Delivery;
 use reticula_lxmf::{LxmfClient, LxmfEvent, MessageStore};
 use reticula_nomad::client::DEFAULT_PAGE_PATH;
 use reticula_nomad::{NomadClient, NomadEvent, Page};
 use reticula_ui::context::{
-    ChatMessage, Conversation, NetworkState, NodeEntry, ViewContext,
+    ChatMessage, Conversation, NetworkState, NodeEntry, SendFailure, ViewContext,
 };
 use reticula_ui::screens::chat::ChatScreen;
 use reticula_ui::screens::chat_list::ChatListScreen;
@@ -161,6 +162,11 @@ struct SharedState {
     page_notice: std::sync::Mutex<String>,
     active_peer: std::sync::Mutex<Option<[u8; 16]>>,
     last_seen: std::sync::Mutex<HashMap<[u8; 16], f64>>,
+    /// Outcome of the most recent outgoing message. Kept so a failed send is
+    /// visible on the chat screen: the composer is cleared as soon as Enter is
+    /// pressed and the transfer runs on a background task, so without this the
+    /// message would silently vanish with no trace.
+    send_failure: std::sync::Mutex<Option<SendFailure>>,
     connected: AtomicBool,
     peer_links: AtomicU32,
 }
@@ -513,9 +519,23 @@ impl<B: Board> ReticulaApp<B> {
             }
             Command::SendMessage { peer, text } => {
                 let lxmf = self.lxmf.clone();
+                let shared = self.shared.clone();
+                // Clear the previous failure immediately so a retry attempt
+                // does not keep showing the old reason while it is in flight.
+                *shared.send_failure.lock().unwrap() = None;
+                let bytes = text.len();
                 tokio::spawn(async move {
-                    if let Err(e) = lxmf.send(peer, "", text).await {
-                        warn!("lxmf send failed: {e}");
+                    match lxmf.send(peer, "", text).await {
+                        Ok(_) => {
+                            info!("reticula: sent {bytes} byte message to {peer:02x?}")
+                        }
+                        Err(e) => {
+                            warn!("reticula: message to {peer:02x?} not delivered: {e}");
+                            *shared.send_failure.lock().unwrap() = Some(SendFailure {
+                                peer,
+                                reason: e.to_string(),
+                            });
+                        }
                     }
                 });
             }
@@ -689,7 +709,11 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
             LxmfEvent::PeerDisconnected(_) => {
                 self.shared.peer_links.fetch_sub(1, Ordering::Relaxed);
             }
-            LxmfEvent::Delivered(_) => {}
+            LxmfEvent::Delivered(_) => {
+                // A sent message has been confirmed by the recipient; redraw
+                // so it stops being shown as still sending.
+                self.refresh_messages();
+            }
             LxmfEvent::Undeliverable { message_id, reason } => {
                 warn!("message {message_id:02x?} undeliverable: {reason}");
             }
@@ -797,6 +821,7 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
             .iter()
             .map(|m| ChatMessage {
                 incoming: m.incoming,
+                sending: !m.incoming && m.delivery == Delivery::Sending,
                 title: m.title_string(),
                 content: m.content_string(),
                 ts: m.timestamp,
@@ -852,11 +877,13 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
         let page = shared.page.lock().unwrap();
         let page_node = shared.page_node.lock().unwrap();
         let page_notice = shared.page_notice.lock().unwrap();
+        let send_failure = shared.send_failure.lock().unwrap();
 
         let ctx = ViewContext {
             conversations: &conversations,
             messages: &messages,
             nodes: &nodes,
+            send_failure: send_failure.as_ref(),
             page: page.as_ref(),
             page_node: page_node.as_ref(),
             page_notice: &page_notice,

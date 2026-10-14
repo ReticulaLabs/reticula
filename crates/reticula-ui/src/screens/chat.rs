@@ -17,8 +17,6 @@ pub struct ChatScreen {
     pub peer: [u8; 16],
     /// Composer input buffer.
     pub input: String,
-    /// Last send error, shown in the status line.
-    pub error: Option<String>,
     /// First visible message row (0 = bottom, larger = older).
     scroll: usize,
     /// Follow new messages (auto-scroll to bottom).
@@ -30,7 +28,6 @@ impl ChatScreen {
         Self {
             peer,
             input: String::new(),
-            error: None,
             scroll: 0,
             following: true,
         }
@@ -40,7 +37,6 @@ impl ChatScreen {
     pub fn open(&mut self, peer: [u8; 16]) {
         self.peer = peer;
         self.input.clear();
-        self.error = None;
         self.scroll = 0;
         self.following = true;
     }
@@ -134,15 +130,16 @@ impl ChatScreen {
         let status_y = composer_y - theme.line_h;
         let body = Rectangle::new(Point::new(0, body_top), px(width, status_y - body_top));
 
-        // Build the flattened message rows.
+        // Build the flattened message rows, carrying each row's direction and
+        // whether it is still awaiting delivery confirmation.
         let max_chars = theme.chars_per_line(width - 10);
-        let mut rows: Vec<(bool, String)> = Vec::new();
+        let mut rows: Vec<(bool, bool, String)> = Vec::new();
         for msg in ctx.messages {
             for line in widgets::wrap(&msg.content, max_chars) {
-                rows.push((msg.incoming, line));
+                rows.push((msg.incoming, msg.sending, line));
             }
             if !rows.is_empty() {
-                rows.push((false, String::new())); // spacer
+                rows.push((false, false, String::new())); // spacer
             }
         }
         if !rows.is_empty() {
@@ -158,7 +155,7 @@ impl ChatScreen {
 
         let mut y = body.top_left.y;
         let mut row = 0usize;
-        for (i, (incoming, line)) in rows.iter().enumerate() {
+        for (i, (incoming, sending, line)) in rows.iter().enumerate() {
             if i < self.scroll {
                 continue;
             }
@@ -177,13 +174,17 @@ impl ChatScreen {
                     widgets::draw_text(target, Point::new(4, y), line, theme.text, theme).ok();
                 } else {
                     // Sent messages sit on the right, with a right accent bar.
+                    // Until the recipient's delivery proof arrives they are
+                    // drawn in the warning colour: the bytes are out, but
+                    // nothing has confirmed they landed.
+                    let color = if *sending { theme.warning } else { theme.text };
                     let text_w = line.chars().count() as i32 * theme.char_w;
                     let x = (width - 5 - text_w).max(4);
-                    widgets::draw_text(target, Point::new(x, y), line, theme.text, theme).ok();
+                    widgets::draw_text(target, Point::new(x, y), line, color, theme).ok();
                     widgets::fill_rect(
                         target,
                         Rectangle::new(Point::new(width - 2, y), px(2, theme.line_h)),
-                        theme.accent,
+                        if *sending { theme.warning } else { theme.accent },
                     )
                     .ok();
                 }
@@ -230,14 +231,24 @@ impl ChatScreen {
         // status line. The hint is shortened to whatever the hops leave, so the
         // two can never meet.
         let hops_w = (hops_label.chars().count() as i32 + 1) * theme.char_w;
-        let status = match &self.error {
-            Some(e) => widgets::truncate(e, theme.chars_per_line(width - hops_w - 2)),
+        // Only report a send failure for the conversation it belongs to; a
+        // failure raised while another chat was open must not bleed in here.
+        let error = ctx
+            .send_failure
+            .filter(|f| f.peer == self.peer)
+            .map(|f| f.reason.as_str());
+        let status = match error {
+            Some(e) => {
+                let prefix = "Not sent: ";
+                let room = theme.chars_per_line(width - hops_w - 2).saturating_sub(prefix.len());
+                widgets::truncate(&format!("{prefix}{e}"), room)
+            }
             None => widgets::truncate(
                 "ENTER send | PgUp/PgDn scroll",
                 theme.chars_per_line(width - hops_w - 2),
             ),
         };
-        let dim = if self.error.is_some() {
+        let dim = if error.is_some() {
             theme.danger
         } else {
             theme.text_dim

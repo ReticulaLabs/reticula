@@ -30,9 +30,26 @@ pub struct Conversation {
 pub struct ChatMessage {
     /// True if the message was received (as opposed to sent).
     pub incoming: bool,
+    /// True while an outgoing message has been handed to the transport but not
+    /// yet confirmed by the recipient. Such messages are drawn in the warning
+    /// colour so an unconfirmed send is distinguishable from a delivered one.
+    pub sending: bool,
     pub title: String,
     pub content: String,
     pub ts: f64,
+}
+
+/// Why the most recent outgoing message could not be delivered.
+///
+/// Rendering a failure is the only way the sender learns about it: the
+/// composer is cleared as soon as Enter is pressed, and the transfer itself
+/// happens on a background task.
+#[derive(Debug, Clone, Default)]
+pub struct SendFailure {
+    /// Peer the failed send was addressed to.
+    pub peer: [u8; 16],
+    /// Human-readable reason, e.g. "no path to 3f2a…".
+    pub reason: String,
 }
 
 /// A discovered NomadNet node.
@@ -87,6 +104,9 @@ pub struct ViewContext<'a> {
     pub conversations: &'a [Conversation],
     pub messages: &'a [ChatMessage],
     pub nodes: &'a [NodeEntry],
+    /// Failure of the most recent send, shown on the chat screen it belongs
+    /// to. `None` when the last send succeeded or no send has been attempted.
+    pub send_failure: Option<&'a SendFailure>,
     /// The last fetched NomadNet page, if any.
     pub page: Option<&'a Page>,
     /// Node the currently shown page came from.
