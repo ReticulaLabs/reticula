@@ -153,7 +153,7 @@ impl SettingsLoraScreen {
             self.txp_input = s.tx_power_dbm.to_string();
         }
 
-        widgets::draw_header(target, width, "LoRa", "", &ctx.network, theme).ok();
+        widgets::draw_header(target, width, "LoRa", &ctx.network, theme).ok();
 
         let mut y = theme.header_h;
 

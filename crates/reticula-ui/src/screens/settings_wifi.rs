@@ -134,7 +134,7 @@ impl SettingsWifiScreen {
             self.peer_proto = ctx.peer_proto;
         }
 
-        widgets::draw_header(target, width, "WiFi", "", &ctx.network, theme).ok();
+        widgets::draw_header(target, width, "WiFi", &ctx.network, theme).ok();
 
         let mut y = theme.header_h;
 

@@ -48,7 +48,7 @@ impl SettingsDataScreen {
         let width = size.width as i32;
         let height = size.height as i32;
 
-        widgets::draw_header(target, width, "Data Management", "", &ctx.network, theme).ok();
+        widgets::draw_header(target, width, "Data Management", &ctx.network, theme).ok();
 
         let mut y = theme.header_h;
 

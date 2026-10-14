@@ -13,10 +13,10 @@ pub const LINE_H: i32 = 10;
 
 /// Extra height the top status bar gets beyond one text line.
 ///
-/// The bar carries the title plus the WiFi/LoRa icons. Those glyphs are taller
-/// than a text line, so a bar sized exactly to the text crowds them; the extra
-/// pixels make the icons — and their "current interface" underline — readable at
-/// a glance.
+/// The bar carries the title plus the WiFi/LoRa/GNSS icons. Those glyphs are
+/// taller than a text line, so a bar sized exactly to the text crowds them; the
+/// extra pixels make the icons — and their "current interface" underline —
+/// readable at a glance.
 pub const HEADER_EXTRA_H: i32 = 5;
 
 /// Standard 320×240 display (the T-Deck LCD in landscape).

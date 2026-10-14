@@ -86,7 +86,7 @@ impl SettingsScreen {
         let width = size.width as i32;
         let height = size.height as i32;
 
-        widgets::draw_header(target, width, "Settings", "", &ctx.network, theme).ok();
+        widgets::draw_header(target, width, "Settings", &ctx.network, theme).ok();
 
         // Network status band directly under the header.
         let status = if ctx.network.connected {

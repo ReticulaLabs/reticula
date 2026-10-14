@@ -210,7 +210,7 @@ impl SettingsSystemScreen {
             self.seed(ctx);
         }
 
-        widgets::draw_header(target, width, "System", "", &ctx.network, theme).ok();
+        widgets::draw_header(target, width, "System", &ctx.network, theme).ok();
 
         let mut y = theme.header_h;
 

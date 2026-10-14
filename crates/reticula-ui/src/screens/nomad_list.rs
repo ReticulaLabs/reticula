@@ -89,12 +89,12 @@ impl NomadListScreen {
         let width = size.width as i32;
         let height = size.height as i32;
 
-        let right_label = widgets::hops_label(
+        let hops = widgets::hops_label(
             self.selected
                 .and_then(|addr| filtered.iter().find(|n| n.address == addr))
                 .and_then(|n| n.hops),
         );
-        widgets::draw_header(target, width, "NomadNet", &right_label, &ctx.network, theme).ok();
+        widgets::draw_header(target, width, "NomadNet", &ctx.network, theme).ok();
 
         let header_h = theme.header_h;
         let search_h = if self.filter.is_empty() { 0 } else { theme.line_h };
@@ -168,25 +168,12 @@ impl NomadListScreen {
             }
         }
 
-        let footer = Rectangle::new(
-            Point::new(0, height - theme.line_h),
-            px(width, theme.line_h),
-        );
         let hint = if self.filter.is_empty() {
             "TYPE to search | ENTER browse | ALT+Backspace"
         } else {
             "filtering | ENTER browse | ALT+Backspace"
         };
-        widgets::draw_bar(
-            target,
-            footer,
-            hint,
-            "",
-            theme.surface,
-            theme.text_dim,
-            theme,
-        )
-        .ok();
+        widgets::draw_footer(target, width, height, hint, &hops, theme).ok();
 
         widgets::draw_scrollbar(
             target,

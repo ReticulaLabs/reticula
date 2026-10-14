@@ -79,7 +79,7 @@ impl HomeScreen {
         let width = size.width as i32;
         let height = size.height as i32;
 
-        widgets::draw_header(target, width, "RETICULA", "", &ctx.network, theme).ok();
+        widgets::draw_header(target, width, "RETICULA", &ctx.network, theme).ok();
 
         // Device/identity status band directly under the header.
         let name = if ctx.display_name.is_empty() {

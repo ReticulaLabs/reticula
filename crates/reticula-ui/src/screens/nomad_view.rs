@@ -73,8 +73,8 @@ impl NomadViewScreen {
             .map(|n| n.name.as_str())
             .unwrap_or(&fallback);
         let title = format!("{node_name}");
-        let right_label = widgets::hops_label(ctx.page_node.and_then(|n| n.hops));
-        widgets::draw_header(target, width, &title, &right_label, &ctx.network, theme).ok();
+        let hops = widgets::hops_label(ctx.page_node.and_then(|n| n.hops));
+        widgets::draw_header(target, width, &title, &ctx.network, theme).ok();
 
         let body_top = theme.header_h;
         let body = Rectangle::new(
@@ -117,24 +117,11 @@ impl NomadViewScreen {
             drawn += 1;
         }
 
-        let footer = Rectangle::new(
-            Point::new(0, height - theme.line_h),
-            px(width, theme.line_h),
-        );
         let hint = match &self.current_link {
             Some(link) => format!("ENTER {}", link.label),
             None => "UP/DOWN scroll | ALT+Backspace".to_string(),
         };
-        widgets::draw_bar(
-            target,
-            footer,
-            &hint,
-            "",
-            theme.surface,
-            theme.text_dim,
-            theme,
-        )
-        .ok();
+        widgets::draw_footer(target, width, height, &hint, &hops, theme).ok();
 
         widgets::draw_scrollbar(target, body, self.scroll, page.lines().len(), theme).ok();
     }

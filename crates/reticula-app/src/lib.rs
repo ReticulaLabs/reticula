@@ -20,8 +20,8 @@ pub mod config;
 pub mod identity;
 
 pub use app::{
-    AppError, Clock, PersistGps, PersistIdentity, PersistLora, PersistWifi, ReticulaApp,
-    SystemClock,
+    AppError, Clock, GnssLock, PersistGps, PersistIdentity, PersistLora, PersistWifi,
+    ReticulaApp, SystemClock,
 };
 pub use config::{NetConfig, TransportKind};
 pub use reticula_ui::{GpsSettings, LoraSettings, PeerProtocol, WifiSettings};

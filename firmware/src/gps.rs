@@ -28,6 +28,8 @@ use esp_idf_hal::delay::TickType;
 use esp_idf_hal::gpio::{Gpio43, Gpio44};
 use esp_idf_hal::uart::{self, UartDriver, UART1};
 
+use reticula_app::GnssLock;
+
 use crate::clock::{self, Source};
 
 /// MIA-M10Q factory default baud. Some firmware revisions ship at 115200; if no
@@ -78,10 +80,17 @@ pub fn open(uart1: UART1, tx: Gpio43, rx: Gpio44) -> Option<UartDriver<'static>>
 
 /// Read time from the GNSS, and apply it via [`clock::set_system_time`].
 ///
+/// `lock` is stamped the first time a fix carrying a usable UTC time is
+/// decoded, which is what the status bar shows. Note it is stamped on a valid
+/// fix rather than on a successful [`clock::set_system_time`] — the two are not
+/// the same thing. A fix can arrive when SNTP has already set a good clock, in
+/// which case the write is correctly refused as redundant, yet the receiver
+/// plainly *has* a fix and the icon should say so.
+///
 /// Runs until the process ends. Failures are logged at debug level rather than
 /// warned about, because "no fix" is the normal case indoors and should not
 /// read like a fault.
-pub fn spawn(driver: UartDriver<'static>) {
+pub fn spawn(driver: UartDriver<'static>, lock: GnssLock) {
     let mut sentence = [0u8; SENTENCE_BUF];
     let mut filled = 0usize;
 
@@ -127,6 +136,9 @@ pub fn spawn(driver: UartDriver<'static>) {
 
         if let Some(unix) = parse_sentence_time(text) {
             log::info!("gnss: fix, time of week decoded as unix {unix}");
+            // Stamp before applying: the receiver demonstrably has a fix, and
+            // whether the clock write is useful is a separate question.
+            lock.set_locked();
             if clock::set_system_time(unix, Source::Gnss) {
                 clock::log_status("after GNSS fix");
                 // Keep reading: later fixes correct any drift, and

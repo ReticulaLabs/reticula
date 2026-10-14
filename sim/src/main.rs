@@ -89,13 +89,15 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // No LoRa/GPS persistence on the simulator, and the default host clock is
-// read-only, so the System page can show the time but not change it.
+// read-only, so the System page can show the time but not change it. There is
+    // no GNSS receiver either, so the status bar shows no GPS icon.
     let mut app = ReticulaApp::new(
         board,
         identity,
         display_name,
         net,
         persist_identity,
+        None,
         None,
         None,
         None,

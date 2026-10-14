@@ -71,7 +71,7 @@ impl SettingsGpsScreen {
             self.enabled = ctx.gps_settings.copied().unwrap_or_default().enabled;
         }
 
-        widgets::draw_header(target, width, "GPS", "", &ctx.network, theme).ok();
+        widgets::draw_header(target, width, "GPS", &ctx.network, theme).ok();
 
         let mut y = theme.header_h;
 

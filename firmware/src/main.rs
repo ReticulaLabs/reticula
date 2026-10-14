@@ -32,7 +32,7 @@ use rand_core::UnwrapErr;
 use reticulum_sdk::identity::PrivateIdentity;
 
 use reticula_app::{
-    GpsSettings, LoraSettings, NetConfig, PeerProtocol, PersistGps, PersistIdentity,
+    GnssLock, GpsSettings, LoraSettings, NetConfig, PeerProtocol, PersistGps, PersistIdentity,
     PersistLora, PersistWifi, ReticulaApp, TransportKind, WifiSettings,
 };
 use reticula_tdeck::TDeckBoard;
@@ -130,9 +130,19 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // held up waiting for a GNSS fix (which can take minutes) or an SNTP
     // response. Whichever source lands first wins; see `clock` for why an
     // unclocked node cannot appear on the network at all.
-    if let Some(Some(gnss)) = gnss {
-        std::thread::spawn(move || gps::spawn(gnss));
-    }
+    // Shared with the UI so the status bar can show whether a fix has landed.
+    // Only handed to the app when a receiver actually opened, so a device with
+    // no GNSS (or one disabled in Settings) shows no icon rather than a
+    // permanently red one.
+    let gnss_lock = GnssLock::new();
+    let gnss_for_app = match gnss {
+        Some(Some(gnss)) => {
+            let lock = gnss_lock.clone();
+            std::thread::spawn(move || gps::spawn(gnss, lock));
+            Some(gnss_lock)
+        }
+        _ => None,
+    };
     clock::log_status("startup");
 
     // WiFi (best-effort; the device still runs offline unless disabled). The
@@ -339,6 +349,7 @@ let lora = match lora_settings {
         // correction goes through the same plausibility and ordering rules the
         // automatic sources do.
         Some(Box::new(clock::DeviceClock)),
+        gnss_for_app,
     )
     .await
     .map_err(|e| format!("ReticulaApp::new: {e}"))?;

@@ -136,6 +136,66 @@ where
     Ok(at.y + drawn * theme.line_h)
 }
 
+/// Draw a single line of text so its last glyph ends at `right_x`.
+///
+/// Shared by the bars, which all right-align a short label against a margin, so
+/// the 2 px inset and the glyph-grid alignment are defined once.
+pub fn draw_text_right<D>(
+    target: &mut D,
+    right_x: i32,
+    y: i32,
+    text: &str,
+    color: Rgb565,
+    theme: &Theme,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let w = text.chars().count() as i32 * theme.char_w;
+    draw_text(target, Point::new(right_x - w, y), text, color, theme)
+}
+
+/// Draw the standard bottom status bar: a keymap hint on the left and, on the
+/// same line, `right_label` (the hop count) at the right.
+///
+/// One helper rather than three hand-built copies, so the bar's height, inset and
+/// colours cannot drift apart between screens.
+pub fn draw_footer<D>(
+    target: &mut D,
+    width: i32,
+    height: i32,
+    hint: &str,
+    right_label: &str,
+    theme: &Theme,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let rect = Rectangle::new(
+        Point::new(0, height - theme.line_h),
+        px(width, theme.line_h),
+    );
+    // The hint and the hop count share this one line, so the hint gives up
+    // whatever room the count needs. Truncating the count instead would hide
+    // the very thing the user is looking at; truncating the hint loses only the
+    // tail of a key legend, and only on screens too narrow to show both.
+    let reserved = if right_label.is_empty() {
+        0
+    } else {
+        (right_label.chars().count() as i32 + 1) * theme.char_w
+    };
+    let hint = truncate(hint, theme.chars_per_line(width - reserved));
+    draw_bar(
+        target,
+        rect,
+        &hint,
+        right_label,
+        theme.surface,
+        theme.text_dim,
+        theme,
+    )
+}
+
 /// Draw a labelled bar (used for headers and footers), with a 1-px underline
 /// so it reads as a distinct band.
 pub fn draw_bar<D>(
@@ -174,23 +234,30 @@ where
         let width = rect.size.width as i32;
         let max_chars = theme.chars_per_line(width);
         let trimmed: String = right_label.chars().take(max_chars).collect();
-        let right = rect.top_left
-            + Point::new(
-                width - 2 - (trimmed.chars().count() as i32) * theme.char_w,
-                0,
-            );
-        draw_text(target, right, &trimmed, text_color, theme)?;
+        draw_text_right(
+            target,
+            rect.top_left.x + width - 2,
+            rect.top_left.y,
+            &trimmed,
+            text_color,
+            theme,
+        )?;
     }
     Ok(())
 }
 
-/// Draw the top status bar: title, an optional right label, and the WiFi /
-/// LoRa status icons at the far right.
+/// Draw the top status bar: a title on the left and the status icons at the far
+/// right.
+///
+/// There is deliberately no right-hand label slot. The only thing that ever
+/// wanted one was the hop count, and it belongs on the footer: three status
+/// icons now reach far enough left that a label beside them had nowhere to go,
+/// and truncating it was not enough — it still collided. Removing the slot
+/// makes that class of overlap impossible instead of tuned away.
 pub fn draw_header<D>(
     target: &mut D,
     width: i32,
     title: &str,
-    right_label: &str,
     network: &NetworkState,
     theme: &Theme,
 ) -> Result<(), D::Error>
@@ -211,8 +278,8 @@ where
     // title and the glyphs are centred vertically rather than pinned to the
     // top — otherwise they sit at different heights and the bar looks lopsided.
     let text_y = (height - theme.line_h) / 2;
-    // Icon glyphs span roughly 9px; centre those too.
-    let icon_y = (height - 9) / 2;
+    // Centre the taller status glyphs, leaving the last row for the underline.
+    let icon_y = (height - WIFI_ICON_H) / 2;
 
     draw_text(
         target,
@@ -222,14 +289,16 @@ where
         theme,
     )?;
 
-    let cw = theme.char_w;
+    // The icons are laid out right-to-left and their positions are fixed whether or
+    // not each one is drawn. A GNSS fix can arrive at any moment, and letting
+    // the other icons slide over to fill its place would make the whole bar jump
+    // mid-read; an absent icon just leaves a gap.
 
-    // LoRa icon (far right): an antenna, green when online, red (struck
-    // through) when offline.
+    // LoRa icon (far right): an antenna standing on its ground line, or a ball
+    // resting on it when the radio is down.
     let lora_online = matches!(network.lora_online, Some(true));
     let lora_color = if lora_online { theme.ok } else { theme.danger };
-    let lora_icon_w = 5;
-    let lora_x = width - 2 - lora_icon_w;
+    let lora_x = width - 2 - LORA_ICON_W;
     draw_lora_icon(target, Point::new(lora_x, icon_y), lora_online, lora_color)?;
 
     // WiFi icon (left of LoRa): a signal fan, green when online, red when
@@ -246,9 +315,21 @@ where
         1
     };
     let wifi_color = if wifi_online { theme.ok } else { theme.danger };
-    let wifi_icon_w = 13;
-    let wifi_x = lora_x - 2 - wifi_icon_w;
+    let wifi_x = lora_x - 3 - WIFI_ICON_W;
     draw_wifi_icon(target, Point::new(wifi_x, icon_y), wifi_level, wifi_color)?;
+
+    // GNSS icon (left of WiFi): a crosshair, red while it is still acquiring a
+    // fix and green once it has one. Only drawn when a receiver is configured
+    // — `None` means this device has no GNSS at all, not that it has lost one.
+    let gnss_x = wifi_x - 3 - GNSS_ICON_W;
+    if let Some(locked) = network.gnss_locked {
+        let gnss_color = if locked { theme.ok } else { theme.danger };
+        // Anchored to the bar's baseline rather than centred, so the sphere
+        // appears to sit *on* the underline like a planet on a horizon. The cut
+        // is the row above the underline, which stays its own colour.
+        let gnss_y = height - 1 - GNSS_ICON_H;
+        draw_gnss_icon(target, Point::new(gnss_x, gnss_y), locked, gnss_color)?;
+    }
 
     // A solid red line under the WiFi or LoRa icon marks the interface the
     // currently shown destination is available via. Drawn at the header's
@@ -258,31 +339,17 @@ where
         if network.wifi_iface == Some(dest_iface) {
             fill_rect(
                 target,
-                Rectangle::new(Point::new(wifi_x, underline_y), px(wifi_icon_w, 1)),
+                Rectangle::new(Point::new(wifi_x, underline_y), px(WIFI_ICON_W, 1)),
                 theme.danger,
             )?;
         }
         if network.lora_iface == Some(dest_iface) {
             fill_rect(
                 target,
-                Rectangle::new(Point::new(lora_x, underline_y), px(lora_icon_w, 1)),
+                Rectangle::new(Point::new(lora_x, underline_y), px(LORA_ICON_W, 1)),
                 theme.danger,
             )?;
         }
-    }
-
-    // Right label (counts etc.) to the left of the icons.
-    if !right_label.is_empty() {
-        let max = ((wifi_x - 2) / cw).max(1) as usize;
-        let trimmed: String = right_label.chars().take(max).collect();
-        let rl_x = wifi_x - 2 - (trimmed.chars().count() as i32) * cw;
-        draw_text(
-            target,
-            Point::new(rl_x, text_y),
-            &trimmed,
-            theme.header_text,
-            theme,
-        )?;
     }
 
     Ok(())
@@ -296,10 +363,12 @@ fn draw_wifi_icon<D>(target: &mut D, at: Point, level: u8, color: Rgb565) -> Res
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    // The arcs share a centre above the base dot. `cx`/`cy` place the 13×9 px
-    // glyph inside a bar `line_h` (10) tall with ~1 px to spare.
-    let cx = at.x + 6;
-    let cy = at.y + 7;
+    // The arcs share a centre above the base dot. Radii step by 3 so each
+    // stroke is separated by two clear pixels, which is what makes the level
+    // readable at this size — the old 2 px pitch left single-pixel gaps that
+    // filled in at a glance.
+    let cx = at.x + WIFI_ICON_W / 2;
+    let cy = at.y + WIFI_ICON_H - 1;
     let stroke = PrimitiveStyle::with_stroke(color, 1);
 
     // Base dot.
@@ -308,10 +377,9 @@ where
         .draw(target)?;
 
     // Signal arcs (upper semicircles). Weak signals light only the innermost
-    // arc; stronger signals fill outward. Radii step by 2 so there is a
-    // pixel of clear space between the strokes.
+    // arc; stronger signals fill outward.
     let arcs = level.clamp(1, 4);
-    for r in [2u32, 4, 6].iter().take(arcs as usize) {
+    for r in [3u32, 6, 9].iter().take(arcs as usize) {
         let diameter = r * 2;
         let rect = Rectangle::new(
             Point::new(cx - *r as i32, cy - *r as i32),
@@ -331,36 +399,121 @@ where
 
 /// Draw a LoRa radio antenna icon at `at` (top-left of its bounding box).
 ///
-/// A single vertical mast with a tip ball. When `online` is false a diagonal
-/// strike is drawn through it.
+/// A mast standing on a ground line, with the antenna element as a ball at the
+/// tip. When `online` is false the mast is retracted and the ball drops to the
+/// ground line, so "no radio" reads as an antenna that is *down* rather than
+/// as an icon with a line through it — a strike-through is easy to mistake for
+/// the red "problem" colour at a glance.
 fn draw_lora_icon<D>(target: &mut D, at: Point, online: bool, color: Rgb565) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let x = at.x + 2;
-    let top = at.y + 1;
-    let bottom = at.y + 8;
+    let x = at.x + LORA_ICON_W / 2;
+    let ground_y = at.y + LORA_ICON_H - 1;
     let stroke = PrimitiveStyle::with_stroke(color, 1);
 
-    // Antenna mast.
-    Line::new(Point::new(x, top), Point::new(x, bottom))
-        .into_styled(stroke)
-        .draw(target)?;
-    // Tip ball.
-    Circle::new(Point::new(x - 1, top - 1), 2)
-        .into_styled(PrimitiveStyle::with_fill(color))
-        .draw(target)?;
-    // Strike-through when the radio is offline.
-    if !online {
-        Line::new(Point::new(at.x, at.y + 1), Point::new(at.x + 4, at.y + 8))
+    // Ground line the mast stands on. Drawn in both states so the two read as
+    // the same object in different positions.
+    Line::new(
+        Point::new(at.x, ground_y),
+        Point::new(at.x + LORA_ICON_W - 1, ground_y),
+    )
+    .into_styled(stroke)
+    .draw(target)?;
+
+    if online {
+        // Mast, with the antenna element as a ball at the tip.
+        Line::new(Point::new(x, at.y + 2), Point::new(x, ground_y - 1))
             .into_styled(stroke)
             .draw(target)?;
+        Circle::new(Point::new(x - 1, at.y), 2)
+            .into_styled(PrimitiveStyle::with_fill(color))
+            .draw(target)?;
+    } else {
+        // Retracted: the antenna element sits on the ground line.
+        Circle::new(Point::new(x - 2, ground_y - 3), 4)
+            .into_styled(PrimitiveStyle::with_fill(color))
+            .draw(target)?;
+    }
+
+    Ok(())
+}
+
+/// Draw a GNSS status icon at `at` (top-left of its bounding box).
+///
+/// The top of a sphere rising from below the status bar, cut off by its
+/// underline — a planet's limb on a horizon.
+///
+/// `locked` fills the cap solid; while still acquiring only the limb's edge is
+/// drawn, so the two states differ in shape as well as colour. That matters
+/// because the bar is 15 px tall and a red-versus-green arc on its own is easy
+/// to misread, and it is exactly at a glance, carrying the device, that the user
+/// most needs to know whether the clock is up.
+fn draw_gnss_icon<D>(target: &mut D, at: Point, locked: bool, color: Rgb565) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let cx = at.x + GNSS_ICON_W / 2;
+    let rows = GNSS_CAP_HALF.len() as i32;
+    let bottom = at.y + GNSS_ICON_H - 1;
+
+    // The sphere is mostly below the glyph box: only its cap is drawn, sitting
+    // on the bar's underline the way a planet's limb sits on a horizon. The cap
+    // is rasterised row by row from a precomputed half-width table rather than
+    // with a `Circle`, because a circle primitive would also paint the hidden
+    // lower half over the underline.
+    for (i, &half) in GNSS_CAP_HALF.iter().enumerate() {
+        let y = bottom - (rows - 1) + i as i32;
+        if locked {
+            // A solid body: the receiver has a position, and the planet is
+            // there in full.
+            fill_rect(
+                target,
+                Rectangle::new(Point::new(cx - half, y), px(half * 2 + 1, 1)),
+                color,
+            )?;
+        } else {
+            // An outline: the limb is visible but the body behind it is not,
+            // which is the whole meaning of "still looking".
+            for x in [cx - half, cx + half] {
+                fill_rect(target, Rectangle::new(Point::new(x, y), px(1, 1)), color)?;
+            }
+        }
     }
     Ok(())
 }
 
 /// Side length of a root-menu icon's square bounding box, in pixels.
 pub const MENU_ICON: i32 = 24;
+
+/// Bounding box of the WiFi status glyph, in pixels.
+const WIFI_ICON_W: i32 = 19;
+const WIFI_ICON_H: i32 = 12;
+
+/// Bounding box of the LoRa status glyph, in pixels.
+const LORA_ICON_W: i32 = 9;
+const LORA_ICON_H: i32 = 12;
+
+/// Bounding box of the GNSS status glyph, in pixels.
+const GNSS_ICON_W: i32 = 19;
+/// Height of the visible cap. The sphere is cut off by the bar's baseline, so
+/// this is a sliver of a much larger circle rather than a glyph of its own.
+const GNSS_ICON_H: i32 = 6;
+
+/// Half-width of the sphere's visible cap, per row, widest last.
+///
+/// Sampled from a circle of radius 11 whose top sits half a pixel above the
+/// first row: at each row centre `hw = sqrt(r² − (r − (i + ½))²)` gives 3.28,
+/// 5.55, 6.98, 8.05, 8.87, 9.53. Sampling it matters — the first row opens at
+/// 3 px rather than 1, because a real cap is flat where a hand-picked sequence
+/// tapers to a point and reads as a spire.
+///
+/// The table is precomputed so the glyph costs six `fill_rect` calls with no
+/// trigonometry, and so a test can assert the profile without re-deriving it.
+/// These rows are the top few percent of a circle far wider than the bar: the
+/// rest is below the cut, which is what makes this read as a planet on a horizon
+/// rather than as a ball.
+const GNSS_CAP_HALF: [i32; 6] = [3, 5, 7, 8, 9, 9];
 
 /// A section icon shown beside an entry on a menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -928,6 +1081,101 @@ pub fn hops_label(hops: Option<u8>) -> String {
     }
 }
 
+/// Test-only draw target, shared by the glyph and layout test modules.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use embedded_graphics::draw_target::DrawTarget;
+    use embedded_graphics::geometry::{OriginDimensions, Size};
+    use embedded_graphics::pixelcolor::Rgb565;
+    use embedded_graphics::primitives::Rectangle;
+    use embedded_graphics::Pixel;
+
+    /// A draw target that records painted pixels at any size.
+    ///
+    /// `MockDisplay` is fixed at 64x64, which is smaller than the real 320x240
+    /// panel. Anything that lays out across the full width — the header's icon
+    /// strip, the footer's two-sided line — has to be checked at true dimensions,
+    /// or the test is measuring a screen nobody uses.
+    pub struct Painted {
+        w: i32,
+        h: i32,
+        px: Vec<Option<Rgb565>>,
+    }
+
+    impl Painted {
+        pub fn new(w: i32, h: i32) -> Self {
+            Self {
+                w,
+                h,
+                px: vec![None; (w * h) as usize],
+            }
+        }
+
+        pub fn get(&self, x: i32, y: i32) -> Option<Rgb565> {
+            if x < 0 || y < 0 || x >= self.w || y >= self.h {
+                return None;
+            }
+            self.px[(y * self.w + x) as usize]
+        }
+
+        fn set(&mut self, x: i32, y: i32, c: Rgb565) {
+            if x >= 0 && y >= 0 && x < self.w && y < self.h {
+                self.px[(y * self.w + x) as usize] = Some(c);
+            }
+        }
+
+        /// Columns holding a painted pixel on any of `rows` that is not one of
+        /// `ignore`.
+        ///
+        /// `ignore` exists because bars paint their whole background and
+        /// underline across the full width; without it every column would look
+        /// painted and the test would measure nothing.
+        pub fn glyph_cols(&self, rows: std::ops::Range<i32>, ignore: &[Rgb565]) -> Vec<i32> {
+            (0..self.w)
+                .filter(|x| {
+                    rows.clone()
+                        .any(|y| self.get(*x, y).is_some_and(|c| !ignore.contains(&c)))
+                })
+                .collect()
+        }
+    }
+
+    impl OriginDimensions for Painted {
+        fn size(&self) -> Size {
+            Size::new(self.w as u32, self.h as u32)
+        }
+    }
+
+    impl DrawTarget for Painted {
+        type Color = Rgb565;
+        type Error = core::convert::Infallible;
+
+        fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+        where
+            I: IntoIterator<Item = Pixel<Self::Color>>,
+        {
+            for p in pixels {
+                self.set(p.0.x, p.0.y, p.1);
+            }
+            Ok(())
+        }
+
+        fn fill_solid(&mut self, area: &Rectangle, color: Rgb565) -> Result<(), Self::Error> {
+            for y in area.top_left.y..area.top_left.y + area.size.height as i32 {
+                for x in area.top_left.x..area.top_left.x + area.size.width as i32 {
+                    self.set(x, y, color);
+                }
+            }
+            Ok(())
+        }
+
+        fn clear(&mut self, color: Rgb565) -> Result<(), Self::Error> {
+            self.px.fill(Some(color));
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1005,6 +1253,7 @@ mod tests {
 
 #[cfg(test)]
 mod layout_tests {
+    use super::test_support::Painted;
     use super::*;
 
     use crate::theme::{Theme, DISPLAY_H, DISPLAY_W, HEADER_EXTRA_H};
@@ -1040,16 +1289,335 @@ mod layout_tests {
     #[test]
     fn the_status_bar_fits_its_icons() {
         let theme = Theme::default();
-        // Glyphs are ~9px tall; the underline sits on the last row of the bar.
         assert!(
-            theme.header_h >= 9 + 2,
-            "bar {} is too short for a 9px icon plus the underline",
+            theme.header_h >= WIFI_ICON_H.max(LORA_ICON_H) + 2,
+            "bar {} is too short for a {WIFI_ICON_H}px glyph plus the underline",
             theme.header_h
         );
         // Body content must start below the bar, not under it.
         assert!(
             body_top(&theme) > theme.header_h,
             "body content must clear the status bar"
+        );
+    }
+
+    /// Where each status glyph is actually drawn, in absolute pixels.
+    fn glyph_boxes(width: i32, theme: &Theme) -> [Rectangle; 3] {
+        // The icon glyphs are centred; the sphere is anchored to the baseline so
+        // it sits on the underline. Mirrors `draw_header` exactly — if these two
+        // ever disagree, the containment test below checks the wrong box.
+        let icon_y = (theme.header_h - WIFI_ICON_H) / 2;
+        let gnss_y = theme.header_h - 1 - GNSS_ICON_H;
+        let lora_x = width - 2 - LORA_ICON_W;
+        let wifi_x = lora_x - 3 - WIFI_ICON_W;
+        let gnss_x = wifi_x - 3 - GNSS_ICON_W;
+        let box_at = |x, y, w, h| Rectangle::new(Point::new(x, y), Size::new(w as u32, h as u32));
+        [
+            box_at(gnss_x, gnss_y, GNSS_ICON_W, GNSS_ICON_H),
+            box_at(wifi_x, icon_y, WIFI_ICON_W, WIFI_ICON_H),
+            box_at(lora_x, icon_y, LORA_ICON_W, LORA_ICON_H),
+        ]
+    }
+
+    /// Every status glyph must fit inside the bar, clear of its underline, and must
+    /// not collide with its neighbours — the header is only wide enough for one
+    /// of each, and there are now three.
+    #[test]
+    fn status_glyphs_fit_inside_the_bar_without_overlapping() {
+        let theme = Theme::default();
+        let [gnss, wifi, lora] = glyph_boxes(DISPLAY_W, &theme);
+        let bar = Rectangle::new(
+            Point::new(0, 0),
+            Size::new(DISPLAY_W as u32, theme.header_h as u32),
+        );
+
+        for (name, glyph) in [("GNSS", gnss), ("WiFi", wifi), ("LoRa", lora)] {
+            assert!(
+                bar.intersection(&glyph) == glyph,
+                "{name} glyph {glyph:?} escapes the {}-tall bar",
+                theme.header_h
+            );
+            // The last row belongs to the interface underline.
+            assert!(
+                glyph.bottom_right().map(|p| p.y).unwrap_or(0) < theme.header_h - 1,
+                "{name} glyph must leave the underline row free"
+            );
+            assert!(glyph.top_left.x >= 0, "{name} glyph runs off the left edge");
+        }
+
+        // A gap between each pair, so no two ever read as one blob. Laid out
+        // right-to-left, so check each against the one to its left.
+        for (right_name, right, left_name, left) in
+            [("LoRa", lora, "WiFi", wifi), ("WiFi", wifi, "GNSS", gnss)]
+        {
+            assert!(
+                right.intersection(&left) != right,
+                "{right_name} and {left_name} glyphs overlap: {right:?} vs {left:?}"
+            );
+        }
+    }
+
+    /// A stronger signal must paint more of the fan, or the glyph is not
+    /// actually communicating RSSI.
+    #[test]
+    fn a_stronger_signal_paints_more_of_the_wifi_fan() {
+        use embedded_graphics::mock_display::MockDisplay;
+
+        let painted = |level: u8| {
+            let mut c: MockDisplay<Rgb565> = MockDisplay::new();
+            c.set_allow_overdraw(true);
+            draw_wifi_icon(&mut c, Point::new(0, 0), level, Rgb565::new(31, 31, 31)).unwrap();
+            let area = c.affected_area();
+            (area.size.width as u32) * (area.size.height as u32)
+        };
+
+        assert!(
+            painted(1) < painted(2),
+            "level 2 should be bigger than level 1"
+        );
+        assert!(
+            painted(2) < painted(3),
+            "level 3 should be bigger than level 2"
+        );
+        // Level 4 clamps to three arcs, the same as level 3.
+        assert_eq!(painted(3), painted(4));
+    }
+
+    /// An offline radio must read as an antenna that is *down*, not as an icon with
+    /// a line through it — a strike-through collides with the red "problem"
+    /// colour and is easy to misread.
+    #[test]
+    fn an_offline_radio_draws_a_dropped_antenna() {
+        use embedded_graphics::mock_display::MockDisplay;
+
+        let glyph_y = |online: bool| {
+            let mut c: MockDisplay<Rgb565> = MockDisplay::new();
+            c.set_allow_overdraw(true);
+            draw_lora_icon(&mut c, Point::new(0, 0), online, Rgb565::new(31, 31, 31)).unwrap();
+            c.affected_area()
+        };
+
+        let up = glyph_y(true);
+        let down = glyph_y(false);
+
+        // Standing: the antenna element is at the top of the glyph.
+        assert!(
+            up.top_left.y < LORA_ICON_H / 3,
+            "an online antenna should reach the top of the glyph, starts at {:?}",
+            up.top_left
+        );
+        assert!(
+            down.top_left.y > LORA_ICON_H / 2,
+            "a retracted antenna should only occupy the bottom, starts at {:?}",
+            down.top_left
+        );
+
+        // Both states share the ground line, so they read as one object.
+        assert_eq!(up.bottom_right(), down.bottom_right());
+    }
+
+    /// A GNSS icon must actually change shape between searching and locked, not
+    /// just colour: on a 15 px bar a red ring and a green ring are easy to
+    /// confuse, and the user needs to know at a glance whether the clock is up.
+    #[test]
+    fn the_gnss_icon_distinguishes_searching_from_locked() {
+        use embedded_graphics::mock_display::MockDisplay;
+
+        let render = |locked: bool| {
+            let mut c: MockDisplay<Rgb565> = MockDisplay::new();
+            c.set_allow_overdraw(true);
+            draw_gnss_icon(&mut c, Point::new(0, 0), locked, Rgb565::new(31, 31, 31)).unwrap();
+            c
+        };
+
+        let white = Rgb565::new(31, 31, 31);
+        let cx = GNSS_ICON_W / 2;
+
+        // Take a pixel just inside the limb, in the middle row of the cap. The
+        // limb is drawn in both states, so this is specifically what separates a
+        // filled sphere from an outlined one — the property a glance reads.
+        let inside = Point::new(cx, GNSS_ICON_H / 2);
+        assert_eq!(
+            render(true).get_pixel(inside),
+            Some(white),
+            "a locked GNSS must be a solid body, not just an outline"
+        );
+        assert_eq!(
+            render(false).get_pixel(inside),
+            None,
+            "a searching GNSS must be outline only, or the two states look alike"
+        );
+
+        // The limb is drawn in both states, so "still looking" is never
+        // mistaken for "broken" or "absent". Checked at the extreme left of the
+        // widest row, which only the outline ever touches.
+        for (state, locked) in [("searching", false), ("locked", true)] {
+            assert_eq!(
+                render(locked).get_pixel(Point::new(
+                    cx - *GNSS_CAP_HALF.last().unwrap(),
+                    GNSS_ICON_H - 1
+                )),
+                Some(white),
+                "the {state} sphere must draw its limb at the edge of the cap"
+            );
+        }
+    }
+
+    /// The cap's width profile must be monotonically non-decreasing top to
+    /// bottom. That is what makes the glyph read as the top of a sphere — a
+    /// profile that narrows again, or jumps around, reads as a spire or a lump.
+    #[test]
+    fn the_gnss_cap_widens_towards_its_cut() {
+        assert!(
+            GNSS_CAP_HALF.windows(2).all(|w| w[0] <= w[1]),
+            "cap profile {GNSS_CAP_HALF:?} must widen or hold, never narrow"
+        );
+        // And it must actually reach the box edge, or the sphere is floating
+        // inside its own bounding box and the widest row is wasted space.
+        assert_eq!(
+            *GNSS_CAP_HALF.last().unwrap() * 2 + 1,
+            GNSS_ICON_W,
+            "the widest row must span the glyph's full width"
+        );
+    }
+
+    /// The status bar must not shift when a GNSS fix lands. A fix can arrive at
+    /// any moment, and sliding the other icons over to fill its place would
+    /// move the WiFi/LoRa glyphs — and their interface underlines — mid-read.
+    #[test]
+    fn acquiring_a_gnss_fix_does_not_move_the_other_icons() {
+        use embedded_graphics::mock_display::MockDisplay;
+
+        // `MockDisplay` is 64×64, so render into that rather than the real 320-wide
+        // panel; the icons are placed from the right edge, so every relative
+        // position under test is the same.
+        const W: i32 = 64;
+        let bar = |gnss_locked: Option<bool>| {
+            let theme = Theme::default();
+            let mut c: MockDisplay<Rgb565> = MockDisplay::new();
+            c.set_allow_overdraw(true);
+            let net = NetworkState {
+                wifi_connected: true,
+                wifi_rssi: Some(-55),
+                lora_online: Some(true),
+                gnss_locked,
+                ..Default::default()
+            };
+            draw_header(&mut c, W, "", &net, &theme).unwrap();
+            c
+        };
+
+        // Both WiFi and LoRa are drawn; compare the same two rows in each render.
+        // If the layout shifted, the glyph pixels would land in different
+        // columns.
+        let before = bar(Some(false));
+        let after = bar(Some(true));
+
+        // Everything from the WiFi icon rightwards. The GNSS icon is placed
+        // left of `wifi_x`, so within this window the two renders must be
+        // pixel-identical.
+        let wifi_x = W - 2 - LORA_ICON_W - 3 - WIFI_ICON_W;
+        let differs = |x: i32, y: i32| {
+            let p = Point::new(x, y);
+            before.get_pixel(p) != after.get_pixel(p)
+        };
+
+        let shifted = (0..Theme::default().header_h)
+            .flat_map(|y| (wifi_x..W).map(move |x| (x, y)))
+            .filter(|(x, y)| differs(*x, *y))
+            .count();
+
+        assert_eq!(
+            shifted, 0,
+            "the WiFi/LoRa icons moved when the GNSS icon appeared"
+        );
+    }
+
+    /// The hop count sits on the same line as the key legend, so the legend must
+    /// yield room for it. Rendered separately and compared, because both are
+    /// the same colour and overlap would otherwise be invisible to the eye.
+    #[test]
+    fn the_footer_hint_and_hop_count_never_overlap() {
+        let theme = Theme::default();
+
+        // Every hint currently used on a screen with a footer, at every hop
+        // count `hops_label` can produce, so a longer legend or a wider count
+        // fails here rather than on the device.
+        let hints = [
+            "TYPE to search | ENTER browse | ALT+Backspace",
+            "TYPE to search | ENTER open | ALT+Backspace",
+            "filtering | ENTER browse | ALT+Backspace",
+            "UP/DOWN scroll | ALT+Backspace",
+        ];
+        let counts: Vec<String> = (1..=24).map(|n| hops_label(Some(n))).collect();
+
+        let (w, h) = (DISPLAY_W, DISPLAY_H);
+
+        // Both labels are the same colour, so a collision is invisible to the eye.
+        // Render the real bar, then subtract a render of the hint alone: what
+        // is left is exactly the hop count, in the same render that has to fit.
+        let cols = |hint: &str, right: &str| {
+            let mut c = Painted::new(w, h);
+            draw_footer(&mut c, w, h, hint, right, &theme).unwrap();
+            c.glyph_cols(h - theme.line_h..h, &[theme.surface, theme.border])
+        };
+
+        for hint in hints {
+            for count in &counts {
+                let hint_alone = cols(hint, "");
+                let both = cols(hint, count);
+                let hops_only: Vec<i32> = both
+                    .iter()
+                    .copied()
+                    .filter(|x| !hint_alone.contains(x))
+                    .collect();
+
+                let l_max = hint_alone.iter().max().copied();
+                let r_min = hops_only.iter().min().copied();
+                if let (Some(l_max), Some(r_min)) = (l_max, r_min) {
+                    assert!(
+                        l_max + 2 <= r_min,
+                        "hint {hint:?} reaches column {l_max} and hop count {count:?} starts \
+                         at {r_min}: they collide on a {w}px bar"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The status bar has no right-hand label slot at all, so nothing drawn in
+    /// the body — a hop count, a count, a title — can ever reach the status
+    /// icons. This is the regression guard for the overlap that started it.
+    #[test]
+    fn the_status_bar_leaves_its_icon_strip_clear() {
+        let theme = Theme::default();
+        let mut c = Painted::new(DISPLAY_W, DISPLAY_H);
+        let net = NetworkState {
+            wifi_connected: true,
+            wifi_rssi: Some(-55),
+            lora_online: Some(true),
+            gnss_locked: Some(true),
+            ..Default::default()
+        };
+        draw_header(&mut c, DISPLAY_W, "RETICULA", &net, &theme).unwrap();
+
+        // Between the end of the title and the left edge of the icon strip the
+        // bar must be bare. This is the strip a right-hand label used to be
+        // squeezed into, and the reason the slot was removed rather than
+        // truncated.
+        let [gnss, _, _] = glyph_boxes(DISPLAY_W, &theme);
+        let title_w = "RETICULA".chars().count() as i32 * theme.char_w;
+        let gaps = c.glyph_cols(0..theme.header_h - 1, &[theme.header, theme.border]);
+        let intruders: Vec<i32> = gaps
+            .into_iter()
+            .filter(|x| *x > title_w && *x < gnss.top_left.x - 2)
+            .collect();
+
+        assert!(
+            intruders.is_empty(),
+            "the status bar has content at columns {intruders:?}, between the title (ends at \
+             {title_w}) and the icons (start at {}): the icon strip is not clear",
+            gnss.top_left.x
         );
     }
 

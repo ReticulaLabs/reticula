@@ -126,8 +126,8 @@ impl ChatScreen {
             .iter()
             .find(|c| c.peer == self.peer)
             .and_then(|c| c.hops);
-        let right_label = widgets::hops_label(hops);
-        widgets::draw_header(target, width, &title, &right_label, &ctx.network, theme).ok();
+        let hops_label = widgets::hops_label(hops);
+        widgets::draw_header(target, width, &title, &ctx.network, theme).ok();
 
         let body_top = theme.header_h;
         let composer_y = height - theme.line_h;
@@ -225,19 +225,27 @@ impl ChatScreen {
             .ok();
         }
 
-        // Status line (send errors / hints).
+        // Status line (send errors / hints), with the hop count right-aligned on the
+        // same row — the chat screen has no footer bar, so this is its bottom
+        // status line. The hint is shortened to whatever the hops leave, so the
+        // two can never meet.
+        let hops_w = (hops_label.chars().count() as i32 + 1) * theme.char_w;
         let status = match &self.error {
-            Some(e) => widgets::truncate(e, theme.chars_per_line(width - 4)),
-            None => "ENTER send | PgUp/PgDn scroll".to_string(),
+            Some(e) => widgets::truncate(e, theme.chars_per_line(width - hops_w - 2)),
+            None => widgets::truncate(
+                "ENTER send | PgUp/PgDn scroll",
+                theme.chars_per_line(width - hops_w - 2),
+            ),
         };
-        widgets::draw_text(
-            target,
-            Point::new(0, status_y),
-            &status,
-            if self.error.is_some() { theme.danger } else { theme.text_dim },
-            theme,
-        )
-        .ok();
+        let dim = if self.error.is_some() {
+            theme.danger
+        } else {
+            theme.text_dim
+        };
+        widgets::draw_text(target, Point::new(0, status_y), &status, dim, theme).ok();
+        if !hops_label.is_empty() {
+            widgets::draw_text_right(target, width - 2, status_y, &hops_label, dim, theme).ok();
+        }
     }
 }
 

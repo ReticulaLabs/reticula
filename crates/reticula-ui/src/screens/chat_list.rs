@@ -122,12 +122,12 @@ impl ChatListScreen {
         let width = size.width as i32;
         let height = size.height as i32;
 
-        let right_label = widgets::hops_label(
+        let hops = widgets::hops_label(
             self.selected_peer
                 .and_then(|peer| filtered.iter().find(|c| c.peer == peer))
                 .and_then(|c| c.hops),
         );
-        widgets::draw_header(target, width, "Chat", &right_label, &ctx.network, theme).ok();
+        widgets::draw_header(target, width, "Chat", &ctx.network, theme).ok();
 
         let header_h = theme.header_h;
         let search_h = if self.filter.is_empty() { 0 } else { theme.line_h };
@@ -218,25 +218,12 @@ impl ChatListScreen {
             row_y += theme.line_h;
         }
 
-        let footer = Rectangle::new(
-            Point::new(0, height - theme.line_h),
-            px(width, theme.line_h),
-        );
         let hint = if self.filter.is_empty() {
             "TYPE to search | ENTER open | ALT+Backspace"
         } else {
             "filtering | ENTER open | ALT+Backspace"
         };
-        widgets::draw_bar(
-            target,
-            footer,
-            hint,
-            "",
-            theme.surface,
-            theme.text_dim,
-            theme,
-        )
-        .ok();
+        widgets::draw_footer(target, width, height, hint, &hops, theme).ok();
 
         widgets::draw_scrollbar(
             target,

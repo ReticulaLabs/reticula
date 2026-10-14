@@ -78,6 +78,36 @@ pub trait Clock: Send + Sync {
     fn set(&self, unix_secs: u64) -> bool;
 }
 
+/// Whether the on-board GNSS has a fix, shared between the reader task and the
+/// UI thread.
+///
+/// The receiver runs on its own task and may take minutes to acquire, while
+/// the UI re-renders several times a second, so the flag is a plain atomic
+/// rather than a query. It is deliberately one-way — a receiver that loses its
+/// fix keeps the clock it already gave us (see `set_system_time`, which refuses
+/// to move the clock backwards), so re-acquiring cannot un-sync anything. The
+/// status bar therefore reflects "did we ever get a usable fix", which is the
+/// question that matters: without one the node's announces stay invisible.
+#[derive(Debug, Clone, Default)]
+pub struct GnssLock(Arc<AtomicBool>);
+
+impl GnssLock {
+    /// A flag with no fix yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that a fix carrying a usable UTC time has been decoded.
+    pub fn set_locked(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    /// Whether a fix has been decoded since boot.
+    pub fn is_locked(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 /// A read-only view of the host system clock, used by the simulator.
 ///
 /// [`Clock::set`] deliberately does nothing: the simulator is a development
@@ -187,6 +217,8 @@ pub struct ReticulaApp<B: Board> {
     lora_iface: Option<[u8; 16]>,
     /// Whether a LoRa radio interface is active (`None` = not configured).
     lora_online: Option<bool>,
+    /// GNSS fix status (`None` = no receiver configured on this device).
+    gnss_lock: Option<GnssLock>,
 }
 
 impl<B: Board> ReticulaApp<B> {
@@ -197,6 +229,9 @@ impl<B: Board> ReticulaApp<B> {
     /// restart (so regeneration survives the reboot); `persist_wifi` is called
     /// with new SSID/password. Either may be `None` (e.g. the simulator has no
     /// WiFi persistence).
+    ///
+    /// `gnss_lock` is the handle the GNSS reader task stamps when it decodes a
+    /// fix; `None` on a device with no receiver, which hides its status icon.
     pub async fn new(
         board: B,
         identity: PrivateIdentity,
@@ -207,6 +242,7 @@ impl<B: Board> ReticulaApp<B> {
         persist_lora: Option<PersistLora>,
         persist_gps: Option<PersistGps>,
         clock: Option<Box<dyn Clock>>,
+        gnss_lock: Option<GnssLock>,
     ) -> Result<Self, AppError> {
         let (transport, delivery, wifi_iface, lora_iface) =
             build_transport(&identity, &net).await?;
@@ -299,6 +335,7 @@ impl<B: Board> ReticulaApp<B> {
                     None
                 }
             },
+            gnss_lock,
         })
     }
 
@@ -844,6 +881,7 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
                 dest_iface,
                 wifi_iface: self.wifi_iface,
                 lora_iface: self.lora_iface,
+                gnss_locked: self.gnss_lock.as_ref().map(|g| g.is_locked()),
             },
         };
 

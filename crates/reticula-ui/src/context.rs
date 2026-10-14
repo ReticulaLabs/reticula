@@ -65,6 +65,11 @@ pub struct NetworkState {
     pub wifi_rssi: Option<i8>,
     /// Whether the LoRa radio interface is online. `None` when not configured.
     pub lora_online: Option<bool>,
+    /// Whether the GNSS has a fix carrying a usable UTC time.
+    ///
+    /// `None` when no receiver is configured, which hides the icon entirely;
+    /// `Some(false)` means it is still acquiring and the clock may be unset.
+    pub gnss_locked: Option<bool>,
     /// Interface the currently shown destination is reachable over, if known.
     pub dest_iface: Option<[u8; 16]>,
     /// Interface address of the IP (WiFi) Reticulum interface, if configured.
