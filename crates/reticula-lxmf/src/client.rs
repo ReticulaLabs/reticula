@@ -56,6 +56,10 @@ pub const SEND_RETRY_DELAY: Duration = Duration::from_secs(5);
 /// Bounds the pending-proof map for a peer that never answers: a message can
 /// only be in this state for as long as its link survived anyway.
 pub const PENDING_PROOF_TTL: Duration = Duration::from_secs(300);
+/// How long a delivery proof waits for the sending task to finish registering
+/// its message before being given up on.
+pub const PENDING_PROOF_RETRY_DELAY: Duration = Duration::from_millis(50);
+const PENDING_PROOF_RETRIES: usize = 10;
 
 /// How a peer was observed to be reachable.
 #[derive(Debug, Clone, Copy)]
@@ -540,15 +544,27 @@ impl LxmfClient {
     /// the first point at which "the bytes were handed to the transport"
     /// becomes "the message was actually received".
     async fn handle_link_proof(&self, packet_hash: Hash) {
-        let Some((message_hash, _)) = self.pending_proofs.lock().await.remove(&packet_hash) else {
-            // Proofs also cover keepalives and other traffic; only the ones we
-            // are waiting on are interesting.
-            return;
-        };
-        if self.store.lock().unwrap().set_delivery(message_hash, Delivery::Delivered) {
-            debug!("lxmf: delivery confirmed for {message_hash:02x?}");
-            let _ = self.events.send(LxmfEvent::Delivered(message_hash));
+        // The message is registered as pending just after `send_packed`
+        // returns, so on a fast link the proof can come back before that
+        // bookkeeping has run. Retry briefly rather than dropping the proof
+        // on the floor, which would leave the message stuck in "sending".
+        for _ in 0..PENDING_PROOF_RETRIES {
+            let Some((message_hash, _)) =
+                self.pending_proofs.lock().await.get(&packet_hash).copied()
+            else {
+                // Proofs also cover keepalives and other traffic; only the
+                // ones we are waiting on are interesting.
+                return;
+            };
+            if self.store.lock().unwrap().set_delivery(message_hash, Delivery::Delivered) {
+                self.pending_proofs.lock().await.remove(&packet_hash);
+                debug!("lxmf: delivery confirmed for {message_hash:02x?}");
+                let _ = self.events.send(LxmfEvent::Delivered(message_hash));
+                return;
+            }
+            tokio::time::sleep(PENDING_PROOF_RETRY_DELAY).await;
         }
+        self.pending_proofs.lock().await.remove(&packet_hash);
     }
 
     /// Handle an incoming link event (inbound or outbound).

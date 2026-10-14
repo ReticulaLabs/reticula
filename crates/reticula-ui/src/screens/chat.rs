@@ -268,3 +268,149 @@ fn hex_prefix(peer: &[u8; 16]) -> String {
     s.push('~');
     s
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::{ChatMessage, SendFailure};
+    use crate::context::ViewContext;
+    use crate::theme::Theme;
+    use embedded_graphics::draw_target::DrawTarget;
+    use embedded_graphics::geometry::{OriginDimensions, Size};
+    use embedded_graphics::pixelcolor::Rgb565;
+    use embedded_graphics::Pixel;
+
+    /// Minimal draw target that records every colour written, so a render can
+    /// be asserted on without a display.
+    struct Recorder {
+        width: i32,
+        height: i32,
+        pixels: Vec<Option<Rgb565>>,
+    }
+
+    impl Recorder {
+        fn new(width: i32, height: i32) -> Self {
+            Self { width, height, pixels: vec![None; (width * height) as usize] }
+        }
+
+        fn contains(&self, color: Rgb565) -> bool {
+            self.pixels.contains(&Some(color))
+        }
+
+        /// Whether `color` was drawn anywhere in the message body, i.e. below
+        /// the header and above the composer/status rows.
+        fn contains_in_body(&self, color: Rgb565, theme: &Theme) -> bool {
+            let status_y = self.height - theme.line_h - theme.line_h;
+            (theme.header_h..status_y).any(|y| {
+                (0..self.width).any(|x| {
+                    self.pixels[(y * self.width + x) as usize] == Some(color)
+                })
+            })
+        }
+    }
+
+    impl OriginDimensions for Recorder {
+        fn size(&self) -> Size {
+            Size::new(self.width as u32, self.height as u32)
+        }
+    }
+
+    impl DrawTarget for Recorder {
+        type Color = Rgb565;
+        type Error = core::convert::Infallible;
+
+        fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+        where
+            I: IntoIterator<Item = Pixel<Self::Color>>,
+        {
+            for pixel in pixels {
+                let x = pixel.0.x;
+                let y = pixel.0.y;
+                if x >= 0 && y >= 0 && x < self.width && y < self.height {
+                    self.pixels[(y * self.width + x) as usize] = Some(pixel.1);
+                }
+            }
+            Ok(())
+        }
+
+        fn fill_solid(&mut self, area: &Rectangle, color: Rgb565) -> Result<(), Self::Error> {
+            for y in area.rows() {
+                for x in area.columns() {
+                    if x >= 0 && y >= 0 && x < self.width && y < self.height {
+                        self.pixels[(y * self.width + x) as usize] = Some(color);
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn context<'a>(messages: &'a [ChatMessage], failure: Option<&'a SendFailure>) -> ViewContext<'a> {
+        ViewContext {
+            messages,
+            send_failure: failure,
+            ..ViewContext::default()
+        }
+    }
+
+    fn outbound(sending: bool, content: &str) -> ChatMessage {
+        ChatMessage {
+            incoming: false,
+            sending,
+            title: String::new(),
+            content: content.to_string(),
+            ts: 0.0,
+        }
+    }
+
+    #[test]
+    fn unconfirmed_outgoing_message_renders_in_the_warning_colour() {
+        let theme = Theme::default();
+        let messages = [outbound(true, "pending message")];
+        let mut target = Recorder::new(320, 240);
+        ChatScreen::new([1u8; 16]).render(&mut target, &context(&messages, None), &theme);
+
+        assert!(
+            target.contains(theme.warning),
+            "a message still awaiting its delivery proof must be drawn amber"
+        );
+        // Scoped to the message body: the composer's "Type a message…"
+        // placeholder is drawn in the normal text colour regardless.
+        assert!(
+            !target.contains_in_body(theme.text, &theme),
+            "an unconfirmed message must not be drawn in the normal text colour"
+        );
+    }
+
+    #[test]
+    fn confirmed_outgoing_message_is_not_amber() {
+        let theme = Theme::default();
+        let messages = [outbound(false, "confirmed message")];
+        let mut target = Recorder::new(320, 240);
+        ChatScreen::new([1u8; 16]).render(&mut target, &context(&messages, None), &theme);
+
+        assert!(!target.contains(theme.warning));
+        assert!(target.contains_in_body(theme.text, &theme));
+    }
+
+    #[test]
+    fn the_two_states_render_differently() {
+        // Guards against the colours being indistinguishable on a real panel.
+        let theme = Theme::default();
+        assert_ne!(theme.warning, theme.text);
+    }
+
+    #[test]
+    fn a_failed_send_is_shown_in_the_status_line() {
+        let theme = Theme::default();
+        let messages: [ChatMessage; 0] = [];
+        let failure = SendFailure {
+            peer: [1u8; 16],
+            reason: "no path".to_string(),
+        };
+        let mut target = Recorder::new(320, 240);
+        ChatScreen::new([1u8; 16]).render(&mut target, &context(&messages, Some(&failure)), &theme);
+
+        // The status line is drawn in the danger colour when a send failed.
+        assert!(target.contains(theme.danger));
+    }
+}
