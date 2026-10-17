@@ -10,7 +10,7 @@ use sha2::Digest;
 use tokio::sync::{broadcast, Mutex};
 use tokio::time::{timeout, Duration};
 
-use reticulum_sdk::destination::link::{LinkEvent, LinkId, LinkStatus};
+use reticulum_sdk::destination::link::{LinkEvent, LinkEventData, LinkId, LinkStatus};
 use reticulum_sdk::destination::DestinationName;
 use reticulum_sdk::hash::{AddressHash, Hash};
 use reticulum_sdk::transport::{AnnounceEvent, Transport};
@@ -147,40 +147,33 @@ impl NomadClient {
             self.node_ifaces.lock().unwrap().insert(node, iface);
         }
 
+        // Subscribe to link events *before* the request goes out.
+        //
+        // These are a `tokio::sync::broadcast` channel, and a receiver created
+        // after a send only ever sees events sent after it subscribed. But
+        // `link_request` awaits `send_packet`, which yields to the executor for
+        // the network write, so a node that answers inside that window has its
+        // `LinkEvent::Response` broadcast before we would have subscribed. That
+        // response is then lost permanently: unlike link activation there is no
+        // shared state to re-read, so the loop below would sit waiting for an
+        // event that already happened and report a `Timeout` after the full
+        // `PAGE_REQUEST_TIMEOUT`, on a link that delivered the page instantly.
+        //
+        // Subscribing first closes the window. Events for other links, and for
+        // other requests on this one, are buffered in the receiver's ring and
+        // filtered by the `link_id` / `request_id` checks in the loop.
+        let out_links = self.transport.out_link_events();
+
         let request_id = self
             .transport
             .link_request(link_id, path, Value::Nil)
             .await?;
         trace!("nomad: requested {path} from {node} (request {request_id})");
 
-        let transport = self.transport.clone();
-        let data = timeout(PAGE_REQUEST_TIMEOUT, async move {
-            let mut out_links = transport.out_link_events();
-            loop {
-                let ev = out_links.recv().await.map_err(|_| NomadError::LinkClosed)?;
-                if ev.id != link_id {
-                    continue;
-                }
-                match ev.event {
-                    LinkEvent::Response(response) => {
-                        if response.request_id == request_id {
-                            return Ok(response.data);
-                        }
-                        trace!(
-                            "nomad: ignored response with mismatched request id {}",
-                            response.request_id
-                        );
-                    }
-                    LinkEvent::Closed => {
-                        // The link closed without answering. This happens when
-                        // the node is unreachable or tears the link down after
-                        // a failed request.
-                        return Err(NomadError::LinkClosed);
-                    }
-                    _ => {}
-                }
-            }
-        })
+        let data = timeout(
+            PAGE_REQUEST_TIMEOUT,
+            wait_for_response(out_links, link_id, request_id),
+        )
         .await
         .map_err(|_| NomadError::Timeout)??;
 
@@ -316,6 +309,49 @@ impl NomadClient {
     }
 }
 
+/// Wait for the node's response to `request_id` on `link_id`.
+///
+/// `events` must have been subscribed **before** the request was sent: the
+/// channel is a `tokio::sync::broadcast`, so a receiver created afterwards
+/// never sees a response the node already sent, and because a response leaves
+/// no other trace to re-read, that event is simply gone — the caller would sit
+/// here until `PAGE_REQUEST_TIMEOUT` expired and report a `Timeout` for a page
+/// that had already arrived.
+///
+/// Events already buffered at entry are drained first, so a node that answered
+/// while the request was still being written is served from the receiver's
+/// ring rather than lost. Everything not addressed to this link or this
+/// request is skipped rather than treated as an error.
+async fn wait_for_response(
+    mut events: broadcast::Receiver<LinkEventData>,
+    link_id: LinkId,
+    request_id: AddressHash,
+) -> Result<Value, NomadError> {
+    loop {
+        let ev = events.recv().await.map_err(|_| NomadError::LinkClosed)?;
+        if ev.id != link_id {
+            continue;
+        }
+        match ev.event {
+            LinkEvent::Response(response) => {
+                if response.request_id == request_id {
+                    return Ok(response.data);
+                }
+                trace!(
+                    "nomad: ignored response with mismatched request id {}",
+                    response.request_id
+                );
+            }
+            LinkEvent::Closed => {
+                // The link closed without answering. This happens when the node
+                // is unreachable or tears the link down after a failed request.
+                return Err(NomadError::LinkClosed);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Node name from an announce's app data (raw UTF-8 in the reference client).
 fn announce_name(announce: &AnnounceEvent) -> Option<String> {
     let name = String::from_utf8_lossy(announce.app_data.as_slice()).into_owned();
@@ -323,5 +359,144 @@ fn announce_name(announce: &AnnounceEvent) -> Option<String> {
         None
     } else {
         Some(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reticulum_sdk::destination::link::{LinkEventData, LinkResponse};
+
+    fn addr(b: u8) -> AddressHash {
+        AddressHash::new([b; 16])
+    }
+
+    fn event(link: LinkId, event: LinkEvent) -> LinkEventData {
+        LinkEventData {
+            id: link,
+            address_hash: addr(1),
+            iface: None,
+            event,
+        }
+    }
+
+    /// Send an event. `LinkEventData` is not `Debug`, so `send(..).unwrap()`
+    /// cannot be used here.
+    fn send(tx: &broadcast::Sender<LinkEventData>, ev: LinkEventData) {
+        assert!(
+            tx.send(ev).is_ok(),
+            "no receivers left; test setup is wrong"
+        );
+    }
+
+    fn response(request_id: AddressHash, payload: &str) -> LinkEvent {
+        LinkEvent::Response(LinkResponse {
+            request_id,
+            data: Value::String(payload.into()),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_response_that_arrived_before_the_wait_starts_is_not_lost() {
+        // This is the race `fetch_page` used to lose: the node answered while
+        // the request was still being written, so the response was broadcast
+        // before anything was waiting for it. The only reason it survives is
+        // that the caller subscribed before sending — a broadcast receiver made
+        // afterwards would never see this event, and the fetch would time out
+        // on a page that had already been delivered.
+        let link = addr(7);
+        let request_id = addr(3);
+        let (tx, rx) = broadcast::channel(16);
+
+        send(&tx, event(link, response(request_id, "index.mu")));
+
+        let data = wait_for_response(rx, link, request_id).await.unwrap();
+        assert_eq!(data, Value::String("index.mu".into()));
+    }
+
+    #[tokio::test]
+    async fn a_response_sent_after_the_wait_starts_is_received() {
+        let link = addr(7);
+        let request_id = addr(3);
+        let (tx, rx) = broadcast::channel(16);
+
+        let waiter = tokio::spawn(async move { wait_for_response(rx, link, request_id).await });
+
+        send(&tx, event(link, response(request_id, "late.mu")));
+
+        let data = waiter.await.unwrap().unwrap();
+        assert_eq!(data, Value::String("late.mu".into()));
+    }
+
+    #[tokio::test]
+    async fn a_response_for_another_request_is_skipped() {
+        let link = addr(7);
+        let request_id = addr(3);
+        let (tx, rx) = broadcast::channel(16);
+
+        // Buffered before the wait begins, as a stale answer would be.
+        send(&tx, event(link, response(addr(99), "wrong-request.mu")));
+        send(&tx, event(link, response(request_id, "right.mu")));
+
+        let data = wait_for_response(rx, link, request_id).await.unwrap();
+        assert_eq!(data, Value::String("right.mu".into()));
+    }
+
+    #[tokio::test]
+    async fn a_response_on_another_link_is_skipped() {
+        let link = addr(7);
+        let request_id = addr(3);
+        let (tx, rx) = broadcast::channel(16);
+
+        send(&tx, event(addr(8), response(request_id, "other-link.mu")));
+        send(&tx, event(link, response(request_id, "our-link.mu")));
+
+        let data = wait_for_response(rx, link, request_id).await.unwrap();
+        assert_eq!(data, Value::String("our-link.mu".into()));
+    }
+
+    #[tokio::test]
+    async fn unrelated_link_events_are_skipped() {
+        // Activations, proofs and data all share the out-link channel; none of
+        // them may be mistaken for the response.
+        let link = addr(7);
+        let request_id = addr(3);
+        let (tx, rx) = broadcast::channel(16);
+
+        send(&tx, event(link, LinkEvent::Activated));
+        send(&tx, event(link, LinkEvent::Proof(Hash::new([4u8; 32]))));
+        send(&tx, event(addr(8), LinkEvent::Activated));
+        send(&tx, event(link, response(request_id, "page.mu")));
+
+        let data = wait_for_response(rx, link, request_id).await.unwrap();
+        assert_eq!(data, Value::String("page.mu".into()));
+    }
+
+    #[tokio::test]
+    async fn a_closed_link_before_the_response_is_reported_as_closed() {
+        let link = addr(7);
+        let request_id = addr(3);
+        let (tx, rx) = broadcast::channel(16);
+
+        send(&tx, event(link, LinkEvent::Closed));
+        send(&tx, event(link, response(request_id, "too-late.mu")));
+
+        assert!(matches!(
+            wait_for_response(rx, link, request_id).await,
+            Err(NomadError::LinkClosed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_channel_is_reported_as_closed() {
+        let link = addr(7);
+        let request_id = addr(3);
+        let (tx, rx) = broadcast::channel::<LinkEventData>(16);
+        drop(tx);
+
+        assert!(matches!(
+            wait_for_response(rx, link, request_id).await,
+            Err(NomadError::LinkClosed)
+        ));
     }
 }
