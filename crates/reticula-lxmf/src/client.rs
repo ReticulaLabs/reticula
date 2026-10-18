@@ -118,7 +118,15 @@ pub enum LxmfEvent {
     /// An outbound message was handed to the transport for delivery.
     MessageSent(Arc<LxmfMessage>),
     /// A peer announced its `lxmf/delivery` destination (a chat contact).
-    ContactDiscovered { address: [u8; 16], name: Option<String>, hops: u8 },
+    ///
+    /// `stamp_cost` is the stamp cost the peer requires from senders, as
+    /// announced. `None` means the peer accepts unstamped messages.
+    ContactDiscovered {
+        address: [u8; 16],
+        name: Option<String>,
+        hops: u8,
+        stamp_cost: Option<u64>,
+    },
     /// A link to or from a peer became active.
     PeerConnected(AddressHash),
     /// A link to or from a peer closed.
@@ -128,8 +136,16 @@ pub enum LxmfEvent {
     /// This confirms the peer's delivery destination received and decrypted
     /// the packet. It does *not* confirm the peer parsed, accepted, or
     /// displayed the message — the proof is issued before the receiving
-    /// application sees the payload.
+    /// application sees the payload. A peer configured to require LXMF stamps
+    /// issues this proof and then discards the message anyway.
     Acknowledged([u8; 32]),
+    /// A sent message changed delivery state.
+    ///
+    /// Emitted for every transition the user can observe, including the ones
+    /// that are not failures — previously `Sent` and `Failed` were applied to
+    /// the store silently, so anything rendering from the store kept showing
+    /// the message as pending forever.
+    DeliveryStateChanged { message_id: [u8; 32], state: Delivery },
     /// A previously sent message failed to reach its destination.
     Undeliverable { message_id: [u8; 32], reason: String },
 }
@@ -171,6 +187,12 @@ pub struct LxmfClient {
     peer_ifaces: std::sync::Mutex<HashMap<AddressHash, PeerReachability>>,
     /// LXMF delivery destinations discovered from announces, in discovery order.
     discovered: Mutex<Vec<AddressHash>>,
+    /// Stamp cost each peer requires from senders, learned from its announce.
+    ///
+    /// Only peers that demand a non-zero cost are recorded, so an absent entry
+    /// means "accepts unstamped messages" — the common case, and the one that
+    /// needs no bookkeeping.
+    stamp_costs: Mutex<HashMap<AddressHash, u64>>,
     /// Messages that were handed to the transport but not yet confirmed,
     /// keyed by the transport packet hash whose proof will confirm them, with
     /// the time the entry was created so unanswered entries can be pruned.
@@ -210,6 +232,7 @@ impl LxmfClient {
             in_links: Mutex::new(HashMap::new()),
             peer_ifaces: std::sync::Mutex::new(HashMap::new()),
             discovered: Mutex::new(Vec::new()),
+            stamp_costs: Mutex::new(HashMap::new()),
             pending_proofs: Mutex::new(HashMap::new()),
             seen: Mutex::new(VecDeque::new()),
         }
@@ -296,6 +319,30 @@ impl LxmfClient {
         self.discovered.lock().await.clone()
     }
 
+    /// The stamp cost `peer` requires from senders, if it announced one.
+    ///
+    /// `None` means the peer accepts unstamped messages, or that no announce
+    /// from it has been seen yet.
+    pub async fn stamp_cost(&self, peer: AddressHash) -> Option<u64> {
+        self.stamp_costs.lock().await.get(&peer).copied()
+    }
+
+    /// Record the stamp cost from a peer announce, dropping any stale entry.
+    ///
+    /// Re-announced on a timer, so this is also how a peer that *lowers* its
+    /// stamp cost is noticed.
+    async fn record_stamp_cost(&self, peer: AddressHash, cost: Option<u64>) {
+        let mut costs = self.stamp_costs.lock().await;
+        match cost {
+            Some(cost) if cost > 0 => {
+                costs.insert(peer, cost);
+            }
+            _ => {
+                costs.remove(&peer);
+            }
+        }
+    }
+
     /// The long-running discovery loop. Watches for `lxmf/delivery` announces
     /// so chat contacts show up without requiring an inbound message first.
     pub async fn run_discovery(&self) -> Result<(), LxmfError> {
@@ -303,15 +350,29 @@ impl LxmfClient {
         while let Ok(announce) = announces.recv().await {
             if Self::is_lxmf_delivery(&announce).await {
                 let address = announce.destination.lock().await.desc.address_hash;
-                let name = delivery_name(&announce);
+                let fields = delivery_announce_fields(announce.app_data.as_slice());
+                let name = fields.name;
+                let stamp_cost = fields.stamp_cost;
+                self.record_stamp_cost(address, stamp_cost).await;
                 let mut seen = self.discovered.lock().await;
                 if !seen.contains(&address) {
                     seen.push(address);
-                    info!("lxmf: discovered contact {address} ({name:?}) at {} hops", announce.hops);
+                    info!("lxmf: discovered contact {address} ({name:?}) at {} hops, stamp cost {stamp_cost:?}", announce.hops);
                     let _ = self.events.send(LxmfEvent::ContactDiscovered {
                         address: address.as_slice().try_into().unwrap(),
                         name,
                         hops: announce.hops,
+                        stamp_cost,
+                    });
+                } else {
+                    // Already known, but its advertised requirements may have
+                    // changed since the last announce.
+                    drop(seen);
+                    let _ = self.events.send(LxmfEvent::ContactDiscovered {
+                        address: address.as_slice().try_into().unwrap(),
+                        name: None,
+                        hops: announce.hops,
+                        stamp_cost,
                     });
                 }
             }
@@ -334,6 +395,13 @@ impl LxmfClient {
     /// absence of a proof never causes a retry or a failure. Only a genuine
     /// transport error (a link that closed or was lost, or no route at all)
     /// retries, up to [`SEND_ATTEMPTS`] times.
+    ///
+    /// A peer that announced a non-zero [`stamp_cost`](Self::stamp_cost) is
+    /// refused with [`LxmfError::StampsRequired`]: this client does not
+    /// implement LXMF stamping, and such a peer drops unstamped messages at
+    /// the application layer — after the link layer has already proved them.
+    /// Sending anyway would burn a link establishment, report success, and
+    /// deliver nothing.
     pub async fn send(
         &self,
         destination_hash: [u8; 16],
@@ -362,6 +430,23 @@ impl LxmfClient {
         let stored = self.store.lock().unwrap().push(message, Direction::Outbound);
         let _ = self.events.send(LxmfEvent::MessageSent(stored));
 
+        if let Some(cost) = self.stamp_cost(peer).await {
+            if cost > 0 {
+                let reason = LxmfError::StampsRequired(cost).to_string();
+                warn!("lxmf: refusing to send to {peer}: {reason}");
+                self.store.lock().unwrap().set_delivery(hash, Delivery::Failed);
+                let _ = self.events.send(LxmfEvent::DeliveryStateChanged {
+                    message_id: hash,
+                    state: Delivery::Failed,
+                });
+                let _ = self.events.send(LxmfEvent::Undeliverable {
+                    message_id: hash,
+                    reason: reason.clone(),
+                });
+                return Err(LxmfError::StampsRequired(cost));
+            }
+        }
+
         let mut last_error = None;
         for attempt in 1..=SEND_ATTEMPTS {
             match self.send_packed(destination_hash, packed.clone()).await {
@@ -383,6 +468,10 @@ impl LxmfClient {
                     // would multiply deliveries and report failure for
                     // messages that actually arrived.
                     self.store.lock().unwrap().set_delivery(hash, Delivery::Sent);
+                    let _ = self.events.send(LxmfEvent::DeliveryStateChanged {
+                        message_id: hash,
+                        state: Delivery::Sent,
+                    });
                     info!("lxmf: sent to {peer}, no acknowledgement seen");
                     return Ok(hash);
                 }
@@ -402,8 +491,17 @@ impl LxmfClient {
 
         info!("lxmf: giving up sending to {peer} after {SEND_ATTEMPTS} attempts");
         // A message we have given up on must stop reading as "still sending".
+        let error = last_error.expect("at least one attempt was made");
         self.store.lock().unwrap().set_delivery(hash, Delivery::Failed);
-        Err(last_error.expect("at least one attempt was made"))
+        let _ = self.events.send(LxmfEvent::DeliveryStateChanged {
+            message_id: hash,
+            state: Delivery::Failed,
+        });
+        let _ = self.events.send(LxmfEvent::Undeliverable {
+            message_id: hash,
+            reason: error.to_string(),
+        });
+        Err(error)
     }
 
     /// Wait for the peer's acknowledgement of `message_hash`.
@@ -914,25 +1012,67 @@ fn delivery_app_data(display_name: Option<&str>) -> Vec<u8> {
     rmp_serde::to_vec(&data).unwrap_or_default()
 }
 
-/// Display name from an LXMF delivery announce's app data (a msgpack
-/// `[name, stamp_cost, functionality]` list). Returns `None` when unnamed.
-fn delivery_name(announce: &AnnounceEvent) -> Option<String> {
-    let value: Option<Value> =
-        rmpv::decode::read_value(&mut announce.app_data.as_slice()).ok();
-    let first = match value {
-        Some(Value::Array(items)) => items.first().cloned(),
+/// The parts of an `lxmf/delivery` announce app-data blob this client uses.
+struct DeliveryAnnounce {
+    /// Announced display name, if the peer set a non-empty one.
+    name: Option<String>,
+    /// Stamp cost the peer requires from senders. `None` = accepts unstamped.
+    stamp_cost: Option<u64>,
+}
+
+/// Decode an `lxmf/delivery` announce app-data blob.
+///
+/// Modern announces are a msgpack list `[display_name, stamp_cost,
+/// [supported_functionality]]`; the pre-0.5.0 format was the bare display name
+/// as raw bytes. Both are handled, mirroring the reference decoder, because the
+/// stamp cost is the only way to know in advance that a peer will silently
+/// discard everything we send it.
+fn delivery_announce_fields(app_data: &[u8]) -> DeliveryAnnounce {
+    let empty = DeliveryAnnounce { name: None, stamp_cost: None };
+    if app_data.is_empty() {
+        return empty;
+    }
+
+    // msgpack fixarray (0x90..=0x9f) or array16 (0xdc).
+    let is_list = matches!(app_data[0], 0x90..=0x9f | 0xdc);
+    if !is_list {
+        // Legacy format: the display name as raw bytes.
+        let name = String::from_utf8_lossy(app_data).trim().replace('\0', "").trim().to_string();
+        return DeliveryAnnounce {
+            name: (!name.is_empty()).then_some(name),
+            stamp_cost: None,
+        };
+    }
+
+    let Ok(Value::Array(items)) = rmpv::decode::read_value(&mut &app_data[..]) else {
+        return empty;
+    };
+
+    let name = match items.first() {
+        Some(Value::Binary(b)) => {
+            let n = String::from_utf8_lossy(b).replace('\0', "").trim().to_string();
+            (!n.is_empty()).then_some(n)
+        }
+        Some(Value::String(s)) => {
+            let n = s.as_str().unwrap_or_default().replace('\0', "").trim().to_string();
+            (!n.is_empty()).then_some(n)
+        }
         _ => None,
     };
-    let name = match first {
-        Some(Value::Binary(b)) => String::from_utf8_lossy(&b).into_owned(),
-        Some(Value::String(s)) => s.to_string(),
-        _ => return None,
+
+    // A cost of 0 (or a negative/oversized value) means "no stamps required",
+    // which is the same as not announcing one at all.
+    let stamp_cost = match items.get(1) {
+        // Costs are 1..=254; 0, negatives and anything oversized are treated
+        // as "no stamps required", matching the reference decoder.
+        Some(Value::Integer(v)) => match v.as_u64() {
+            Some(cost) if (1..255).contains(&cost) => Some(cost),
+            _ => None,
+        },
+        _ => None,
     };
-    if name.trim().is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+
+    DeliveryAnnounce { name, stamp_cost }
 }
 
 #[cfg(test)]
@@ -941,6 +1081,77 @@ mod tests {
 
     fn addr(b: u8) -> AddressHash {
         AddressHash::new([b; 16])
+    }
+
+    /// Announce app data as the reference encodes it: a msgpack list
+    /// `[display_name, stamp_cost, [supported_functionality]]`.
+    fn announce_bytes(name: Option<&str>, stamp_cost: Option<u64>) -> Vec<u8> {
+        let name = name
+            .map(|n| Value::Binary(n.as_bytes().to_vec()))
+            .unwrap_or(Value::Nil);
+        let cost = match stamp_cost {
+            Some(c) => Value::Integer(c.into()),
+            None => Value::Nil,
+        };
+        rmp_serde::to_vec(&vec![name, cost, Value::Array(vec![])]).expect("app data")
+    }
+
+    #[test]
+    fn an_unstamped_announce_reports_no_stamp_cost() {
+        // What this client itself announces: no stamps required of senders.
+        let data = announce_bytes(Some("Reticula"), None);
+        let fields = delivery_announce_fields(&data);
+        assert_eq!(fields.name.as_deref(), Some("Reticula"));
+        assert_eq!(fields.stamp_cost, None);
+    }
+
+    #[test]
+    fn a_stamping_announce_reports_its_cost() {
+        // Byte-for-byte what the reference emits for a peer with stamp_cost=8;
+        // cross-checked against `LXMF.LXMF.stamp_cost_from_app_data`.
+        let data = announce_bytes(Some("rust-interop-peer"), Some(8));
+        assert_eq!(data[0], 0x93, "must be a msgpack fixarray of 3");
+        let fields = delivery_announce_fields(&data);
+        assert_eq!(fields.name.as_deref(), Some("rust-interop-peer"));
+        assert_eq!(fields.stamp_cost, Some(8));
+    }
+
+    #[test]
+    fn a_zero_stamp_cost_means_no_stamps_required() {
+        let fields = delivery_announce_fields(&announce_bytes(Some("peer"), Some(0)));
+        assert_eq!(fields.stamp_cost, None);
+    }
+
+    #[test]
+    fn an_out_of_range_stamp_cost_is_ignored() {
+        // The reference clamps: costs below 1 or above 254 are treated as "no
+        // stamp required" rather than trusted.
+        for cost in [255u64, 1000, u64::from(u32::MAX)] {
+            let fields = delivery_announce_fields(&announce_bytes(Some("peer"), Some(cost)));
+            assert_eq!(fields.stamp_cost, None, "cost {cost} must not be honoured");
+        }
+    }
+
+    #[test]
+    fn the_legacy_announce_format_yields_a_name_but_no_cost() {
+        // Pre-0.5.0 announces carried the bare display name as raw bytes.
+        let fields = delivery_announce_fields(b"legacy-node");
+        assert_eq!(fields.name.as_deref(), Some("legacy-node"));
+        assert_eq!(fields.stamp_cost, None);
+    }
+
+    #[test]
+    fn an_unusable_announce_yields_nothing_rather_than_panicking() {
+        for data in [
+            &b""[..],
+            &b"\x92"[..],                    // truncated fixarray
+            &b"\xdc\x00"[..],                // truncated array16
+            &b"\x93\xc0\xc0\xc0"[..],         // array of three nils
+            &b"\x93\xa1a\xa1b\xa1c"[..],     // array of three strings
+        ] {
+            let fields = delivery_announce_fields(data);
+            assert_eq!(fields.stamp_cost, None, "{data:?} must not yield a cost");
+        }
     }
 
     #[test]

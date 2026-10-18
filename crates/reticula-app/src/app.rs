@@ -26,7 +26,8 @@ use reticula_lxmf::{Delivery, LxmfClient, LxmfEvent, MessageStore};
 use reticula_nomad::client::DEFAULT_PAGE_PATH;
 use reticula_nomad::{NomadClient, NomadEvent, Page};
 use reticula_ui::context::{
-    ChatMessage, Conversation, NetworkState, NodeEntry, SendFailure, ViewContext,
+    ChatMessage, Conversation, Delivery as ChatDelivery, NetworkState, NodeEntry, SendFailure,
+    ViewContext,
 };
 use reticula_ui::screens::chat::ChatScreen;
 use reticula_ui::screens::chat_list::ChatListScreen;
@@ -678,12 +679,15 @@ impl<B: Board> ReticulaApp<B> {
                 self.refresh_conversations();
                 self.refresh_messages();
             }
-LxmfEvent::ContactDiscovered { address, name, hops } => {
+LxmfEvent::ContactDiscovered { address, name, hops, stamp_cost } => {
                 let mut contacts = self.shared.contacts.lock().unwrap();
                 match contacts.iter_mut().find(|c| c.peer == address) {
-                    // A re-announce may report a better (shorter) path; keep
-                    // the hop count fresh for the status bar.
-                    Some(existing) => existing.hops = Some(hops),
+                    // A re-announce may report a better (shorter) path, or a
+                    // changed stamp cost; keep both fresh for the UI.
+                    Some(existing) => {
+                        existing.hops = Some(hops);
+                        existing.stamp_cost = stamp_cost;
+                    }
                     None => {
                         let name = name.unwrap_or_default();
                         contacts.push(Conversation {
@@ -695,8 +699,14 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
                             unread: 0,
                             last_ts: 0.0,
                             hops: Some(hops),
+                            stamp_cost,
                         });
                         info!("reticula: discovered LXMF contact {address:02x?}");
+                        if let Some(cost) = stamp_cost {
+                            warn!(
+                                "reticula: contact {address:02x?} requires LXMF stamps (cost {cost}); it cannot be sent to"
+                            );
+                        }
                     }
                 }
                 drop(contacts);
@@ -711,6 +721,13 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
             LxmfEvent::Acknowledged(_) => {
                 // The peer acknowledged the bytes; redraw so the message stops
                 // being shown as pending.
+                self.refresh_messages();
+            }
+            LxmfEvent::DeliveryStateChanged { .. } => {
+                // `Sent` and `Failed` are applied to the store without a
+                // message event of their own, so without this the open chat
+                // would keep rendering the message in whatever state it had
+                // when it was created.
                 self.refresh_messages();
             }
             LxmfEvent::Undeliverable { message_id, reason } => {
@@ -767,6 +784,7 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
         // names and the selected destination's hop count.
         let mut name_by_peer: HashMap<[u8; 16], String> = HashMap::new();
         let mut hops_by_peer: HashMap<[u8; 16], u8> = HashMap::new();
+        let mut stamp_cost_by_peer: HashMap<[u8; 16], u64> = HashMap::new();
         {
             let contacts = self.shared.contacts.lock().unwrap();
             for c in contacts.iter() {
@@ -775,6 +793,9 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
                 }
                 if let Some(hops) = c.hops {
                     hops_by_peer.insert(c.peer, hops);
+                }
+                if let Some(cost) = c.stamp_cost {
+                    stamp_cost_by_peer.insert(c.peer, cost);
                 }
                 by_peer.entry(c.peer).or_insert_with(|| {
                     (
@@ -798,6 +819,7 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
                 unread,
                 last_ts,
                 hops: hops_by_peer.get(&peer).copied(),
+                stamp_cost: stamp_cost_by_peer.get(&peer).copied(),
             })
             .collect();
         conversations.sort_by(|a, b| {
@@ -820,11 +842,16 @@ LxmfEvent::ContactDiscovered { address, name, hops } => {
             .iter()
             .map(|m| ChatMessage {
                 incoming: m.incoming,
-                // Amber only while the message is genuinely in flight. A message that
-                // was written to the transport but never acknowledged settles on
-                // `Sent`, because acknowledgements do not interoperate and an
-                // unproven message is not evidence of a problem.
-                unacknowledged: !m.incoming && m.delivery == Delivery::Pending,
+                // The store's delivery state is carried through verbatim, so
+                // the chat screen can distinguish "still going out" from
+                // "written but unproven" from "never delivered" — rather than
+                // collapsing all three into one amber "unacknowledged" flag.
+                delivery: match m.delivery {
+                    Delivery::Pending => ChatDelivery::Pending,
+                    Delivery::Sent => ChatDelivery::Sent,
+                    Delivery::Acknowledged => ChatDelivery::Acknowledged,
+                    Delivery::Failed => ChatDelivery::Failed,
+                },
                 title: m.title_string(),
                 content: m.content_string(),
                 ts: m.timestamp,

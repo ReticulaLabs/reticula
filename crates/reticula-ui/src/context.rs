@@ -23,6 +23,33 @@ pub struct Conversation {
     pub last_ts: f64,
     /// Hop count to this peer's delivery destination, if known.
     pub hops: Option<u8>,
+    /// Stamp cost this peer requires from senders, if it announced one.
+    ///
+    /// This client does not implement LXMF stamping, so a peer with a cost
+    /// cannot be sent to — the screen marks it so this is never a surprise
+    /// mid-conversation.
+    pub stamp_cost: Option<u64>,
+}
+
+/// Delivery state of an outgoing message, as the chat screen shows it.
+///
+/// None of these states mean "the peer read this". A link-layer proof only
+/// shows the peer's delivery destination decrypted the bytes, which happens
+/// before its application has parsed, accepted, or displayed anything — a peer
+/// configured to require LXMF stamps issues a proof and then discards the
+/// message. The states are deliberately distinct so the screen can say which
+/// of those things actually happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Delivery {
+    /// Handed to the transport; no outcome yet.
+    #[default]
+    Pending,
+    /// Written to a link, but the peer issued no proof for it.
+    Sent,
+    /// The peer's link layer returned a proof. Not a read receipt.
+    Acknowledged,
+    /// The message was not delivered, or was refused before transmission.
+    Failed,
 }
 
 /// A single message shown in an open chat.
@@ -30,15 +57,8 @@ pub struct Conversation {
 pub struct ChatMessage {
     /// True if the message was received (as opposed to sent).
     pub incoming: bool,
-    /// True while an outgoing message has been handed to the transport but not
-    /// yet acknowledged by the peer's link layer. Such messages are drawn in
-    /// the warning colour.
-    ///
-    /// This means "no acknowledgement yet", not "still transmitting": the
-    /// acknowledgement can already be meaningless to the sender, because it
-    /// only shows the peer's delivery destination took the bytes — not that
-    /// the peer displayed anything.
-    pub unacknowledged: bool,
+    /// Delivery state; meaningful only when `incoming` is false.
+    pub delivery: Delivery,
     pub title: String,
     pub content: String,
     pub ts: f64,

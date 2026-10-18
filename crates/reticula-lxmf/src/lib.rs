@@ -44,6 +44,17 @@ pub enum LxmfError {
     NotForUs,
     /// A Reticulum layer error.
     Reticulum(RnsError),
+    /// The peer requires LXMF stamps of at least this cost, and this client
+    /// cannot produce them.
+    ///
+    /// The reference router drops such a message at the application layer,
+    /// *after* the link layer has already proved the packet — so the sender
+    /// sees a successful transfer and a proof, and the message simply never
+    /// appears. Refusing up front is the only way to report this honestly.
+    ///
+    /// The [`Display`](core::fmt::Display) text is kept short because it is
+    /// rendered on the chat screen's status line.
+    StampsRequired(u64),
     /// Outgoing message send timed out waiting for a link to activate.
     SendTimeout,
     /// No path is known to the destination (it has not announced recently).
@@ -67,6 +78,12 @@ impl core::fmt::Display for LxmfError {
             LxmfError::SignatureInvalid => write!(f, "LXMF signature validation failed"),
             LxmfError::NotForUs => write!(f, "LXMF message not addressed to this client"),
             LxmfError::Reticulum(e) => write!(f, "reticulum error: {e}"),
+            LxmfError::StampsRequired(cost) => {
+                // Kept short on purpose: the chat screen prefixes this with
+                // "Not sent: " on a 320px-wide status line, and a sentence
+                // would simply be truncated away.
+                write!(f, "peer needs LXMF stamps (cost {cost})")
+            }
             LxmfError::SendTimeout => write!(f, "LXMF send timed out"),
             LxmfError::NoPathToDestination(h) => {
                 write!(f, "no path to LXMF destination {}", hex16(h))

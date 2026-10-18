@@ -184,6 +184,10 @@ impl ChatListScreen {
                 break;
             }
             let marker = if conv.unread > 0 { " *" } else { "" };
+            // A peer that requires LXMF stamps cannot be sent to by this
+            // client. Flag it in the list, so it is not discovered as a
+            // dead end only after a message has been written.
+            let stamp_marker = if conv.stamp_cost.is_some() { " [!]" } else { "" };
             let preview = widgets::truncate(
                 if conv.last_content.is_empty() {
                     &conv.last_title
@@ -198,7 +202,7 @@ impl ChatListScreen {
             } else {
                 &conv.peer_name
             };
-            let line = format!("{}{} {}", who, marker, preview);
+            let line = format!("{}{}{} {}", who, marker, stamp_marker, preview);
 
             let at = Point::new(0, row_y);
             if row_index == self.state.selected {
@@ -212,8 +216,26 @@ impl ChatListScreen {
                     theme,
                 )
                 .ok();
-            } else {
+            } else if stamp_marker.is_empty() {
                 widgets::draw_text(target, at, &line, theme.text, theme).ok();
+            } else {
+                // Draw the stamp marker in the warning colour and the rest of
+                // the line normally, so the list flags an unsendable peer
+                // without making every row look like an error.
+                widgets::draw_text(target, at, who, theme.text, theme).ok();
+                let x = who.chars().count() as i32 * theme.char_w;
+                widgets::draw_text(
+                    target,
+                    Point::new(x, at.y),
+                    &format!("{marker}{stamp_marker}"),
+                    theme.warning,
+                    theme,
+                )
+                .ok();
+                let x = x + (marker.chars().count() + stamp_marker.chars().count()) as i32
+                    * theme.char_w
+                    + theme.char_w;
+                widgets::draw_text(target, Point::new(x, at.y), &preview, theme.text, theme).ok();
             }
             row_y += theme.line_h;
         }
@@ -276,5 +298,51 @@ mod tests {
     #[test]
     fn matches_address_prefix() {
         assert!(filter_matches(&conv("", "aabbccddeeff00112233445566778899"), "aabb"));
+    }
+
+    /// Render the list with one conversation and report whether the stamp
+    /// marker was drawn in the warning colour.
+    fn renders_stamp_marker(stamp_cost: Option<u64>) -> bool {
+        use crate::testing::Recorder;
+        use crate::theme::Theme;
+
+        let theme = Theme::default();
+        let conversations = [Conversation {
+            peer: [0u8; 16],
+            peer_hex: "aabbccddeeff00112233445566778899".to_string(),
+            peer_name: "Pepper".to_string(),
+            last_content: "hi".to_string(),
+            stamp_cost,
+            ..Default::default()
+        }];
+        let ctx = ViewContext {
+            conversations: &conversations,
+            ..ViewContext::default()
+        };
+        let mut target = Recorder::new(320, 240);
+        ChatListScreen::new().render(&mut target, &ctx, &theme);
+
+        // Scan the whole list body: nothing else in it is drawn in the
+        // warning colour, so any hit is the marker.
+        let body = theme.header_h..target.status_y(&theme);
+        target.contains_in_rows(body, theme.warning)
+    }
+
+    #[test]
+    fn a_stamp_requiring_peer_is_marked_in_the_list() {
+        // The failure this prevents is invisible until the user opens the
+        // chat and composes a message, so the list has to say it up front.
+        assert!(
+            renders_stamp_marker(Some(8)),
+            "a peer requiring stamps must be flagged in the list"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_peer_is_not_marked() {
+        assert!(
+            !renders_stamp_marker(None),
+            "an ordinary peer must not be flagged"
+        );
     }
 }
