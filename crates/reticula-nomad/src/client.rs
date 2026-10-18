@@ -4,9 +4,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use log::{debug, trace};
+use log::{debug, trace, warn};
 use rmpv::Value;
 use sha2::Digest;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, Mutex};
 use tokio::time::{timeout, Duration};
 
@@ -36,7 +37,11 @@ pub const PATH_REDISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone)]
 pub enum NomadEvent {
     /// A `nomadnetwork/node` destination announced on the network.
-    NodeDiscovered { address: AddressHash, name: Option<String>, hops: u8 },
+    NodeDiscovered {
+        address: AddressHash,
+        name: Option<String>,
+        hops: u8,
+    },
 }
 
 /// A NomadNet browser.
@@ -84,13 +89,7 @@ impl NomadClient {
     /// Whether an announce event is for a `nomadnetwork/node` destination.
     pub async fn is_nomad_node(announce: &AnnounceEvent) -> bool {
         let dest = announce.destination.lock().await;
-        let Ok(identity_hash) = dest
-            .desc
-            .identity
-            .address_hash
-            .as_slice()
-            .try_into()
-        else {
+        let Ok(identity_hash) = dest.desc.identity.address_hash.as_slice().try_into() else {
             return false;
         };
         let expected = Self::node_address_for(&identity_hash);
@@ -104,22 +103,45 @@ impl NomadClient {
 
     /// The long-running discovery loop. Watches for node announces.
     pub async fn run(&self) -> Result<(), NomadError> {
-        let mut announces = self.transport.recv_announces().await;
-        while let Ok(announce) = announces.recv().await {
+        let announces = self.transport.recv_announces().await;
+        self.watch_announces(announces).await;
+        Ok(())
+    }
+
+    /// Consume the announce stream until the transport closes it.
+    async fn watch_announces(&self, mut announces: broadcast::Receiver<AnnounceEvent>) {
+        loop {
+            // Falling behind the announce stream is not the end of it. A
+            // broadcast receiver reports `Lagged` once when it has missed
+            // events, and a `while let Ok(..)` loop would treat that as
+            // termination: node discovery would then stop for the rest of the
+            // session, silently, because this function returns `Ok`.
+            let announce = match announces.recv().await {
+                Ok(announce) => announce,
+                Err(RecvError::Lagged(missed)) => {
+                    warn!("nomad: fell behind the announce stream, missed {missed} announce(s)");
+                    continue;
+                }
+                Err(RecvError::Closed) => return,
+            };
             if Self::is_nomad_node(&announce).await {
                 let address = announce.destination.lock().await.desc.address_hash;
                 let name = announce_name(&announce);
                 let mut seen = self.discovered.lock().await;
                 if !seen.contains(&address) {
                     seen.push(address);
-                    debug!("nomad: discovered node {address} ({name:?}) at {} hops", announce.hops);
-                    let _ = self
-                        .events
-                        .send(NomadEvent::NodeDiscovered { address, name, hops: announce.hops });
+                    debug!(
+                        "nomad: discovered node {address} ({name:?}) at {} hops",
+                        announce.hops
+                    );
+                    let _ = self.events.send(NomadEvent::NodeDiscovered {
+                        address,
+                        name,
+                        hops: announce.hops,
+                    });
                 }
             }
         }
-        Ok(())
     }
 
     /// Fetch a page from a node.
@@ -366,9 +388,61 @@ fn announce_name(announce: &AnnounceEvent) -> Option<String> {
 mod tests {
     use super::*;
     use reticulum_sdk::destination::link::{LinkEventData, LinkResponse};
+    use reticulum_sdk::destination::{SingleInputDestination, SingleOutputDestination};
+    use reticulum_sdk::identity::PrivateIdentity;
 
     fn addr(b: u8) -> AddressHash {
         AddressHash::new([b; 16])
+    }
+
+    /// Falling behind the announce stream must not end node discovery, for the
+    /// same reason it must not end LXMF contact discovery: the receiver reports
+    /// `Lagged` once, a `while let Ok(..)` loop reads that as end-of-stream, and
+    /// this function returns `Ok` so nothing would be logged.
+    #[tokio::test]
+    async fn falling_behind_the_announce_stream_does_not_end_discovery() {
+        use reticulum_sdk::transport::{AnnounceEvent, Transport, TransportConfig};
+
+        let client = Arc::new(NomadClient::new(
+            Arc::new(Transport::new(TransportConfig::default())),
+            16,
+        ));
+
+        let other = SingleInputDestination::new(
+            PrivateIdentity::new_from_name("nomad-test-noise"),
+            DestinationName::new("example_utilities", "noise"),
+        );
+        let event = || AnnounceEvent {
+            destination: Arc::new(Mutex::new(SingleOutputDestination::new_from_desc(
+                other.desc,
+            ))),
+            hops: 1,
+            snr: None,
+            rssi: None,
+            app_data: Default::default(),
+        };
+
+        let (tx, rx) = broadcast::channel::<AnnounceEvent>(1);
+        let watcher = tokio::spawn({
+            let c = client.clone();
+            async move { c.watch_announces(rx).await }
+        });
+        for _ in 0..4 {
+            let _ = tx.send(event());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(
+            !watcher.is_finished(),
+            "discovery must still be running after missing announces"
+        );
+
+        drop(tx);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            watcher.is_finished(),
+            "closing the stream does end discovery"
+        );
     }
 
     fn event(link: LinkId, event: LinkEvent) -> LinkEventData {

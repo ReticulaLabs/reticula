@@ -30,8 +30,11 @@ repository = "https://github.com/kallisti5/reticula"
 rust-version = "1.85"
 
 [workspace.dependencies]
-# Reticulum-sdk has an "embedded" feature for low-resource devices
-reticulum-sdk = { version = "2.3", default-features = false, features = ["alloc", "embedded"] }
+# Reticulum-sdk has an "embedded" feature for low-resource devices.
+# 2.3.9 is the floor: it is the first release where a destination's default app
+# data is included in the path response it answers a path request with, which
+# reticula-lxmf relies on to publish its announce data on that path too.
+reticulum-sdk = { version = "2.3.9", default-features = false, features = ["alloc", "embedded"] }
 embedded-graphics = "0.8"
 
 # Targeted tokio features: `signal`/`process` pull in signal-hook-registry,

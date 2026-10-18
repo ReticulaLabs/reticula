@@ -26,6 +26,8 @@ pub mod widgets;
 pub use command::{
     Command, GpsSettings, LoraSettings, PeerProtocol, ScreenId, WifiSettings,
 };
-pub use context::{ChatMessage, Conversation, Delivery, NetworkState, NodeEntry, ViewContext};
+pub use context::{
+    ChatMessage, Conversation, Delivery, NetworkState, NodeEntry, Stamping, ViewContext,
+};
 pub use screens::Screen;
 pub use theme::Theme;

@@ -6,7 +6,7 @@
 //! packed message = destination_hash (16)
 //!                | source_hash (16)
 //!                | ed25519_signature (64)
-//!                | msgpack([timestamp, title, content, fields])
+//!                | msgpack([timestamp, title, content, fields, stamp?])
 //! ```
 //!
 //! Where
@@ -18,6 +18,12 @@
 //! ```
 //!
 //! The `fields` entry is always a msgpack map (empty if unset).
+//!
+//! An optional 5th element carries the stamp. It is deliberately *outside*
+//! `hashed_part`: a stamp is derived from the message hash, so including it in
+//! what gets hashed would be circular. The reference strips it for the same
+//! reason and re-packs the 4-element form — which is exactly what
+//! [`LxmfMessage::unpack`] does, so both implementations agree on the hash.
 
 use rmpv::Value;
 use sha2::{Digest, Sha256};
@@ -25,6 +31,7 @@ use sha2::{Digest, Sha256};
 use ed25519_dalek::Signature;
 use reticulum_sdk::identity::{Identity, PrivateIdentity};
 
+use crate::stamper::{STAMP_LEN as STAMP_LENGTH};
 use crate::LxmfError;
 
 /// Length of a truncated Reticulum address hash (LXMF destination/source hash).
@@ -88,6 +95,20 @@ pub struct LxmfMessage {
     pub signature: [u8; SIGNATURE_LENGTH],
     /// Whether the signature was validated against a known source identity.
     pub signature_validated: bool,
+    /// Stamp proving this message was not free for the sender to produce.
+    ///
+    /// Absent unless the sender's peer required one. See
+    /// [`crate::stamper`] for what a stamp actually is.
+    pub stamp: Option<[u8; STAMP_LENGTH]>,
+    /// Value of the stamp, in leading zero bits, once checked.
+    ///
+    /// `None` until [`LxmfMessage::check_stamp`] has been called.
+    pub stamp_value: Option<u64>,
+    /// Outcome of stamp verification: `Some(true)` valid, `Some(false)`
+    /// invalid, `None` not checked.
+    ///
+    /// Checking costs a 768 KB workblock, so it is never done implicitly.
+    pub stamp_valid: Option<bool>,
     /// Whether this message was received (as opposed to locally created).
     pub incoming: bool,
     /// Whether the message has been acknowledged by its recipient's link
@@ -118,6 +139,9 @@ impl LxmfMessage {
             hash: [0u8; HASH_LENGTH],
             signature: [0u8; SIGNATURE_LENGTH],
             signature_validated: false,
+            stamp: None,
+            stamp_value: None,
+            stamp_valid: None,
             incoming: false,
             // Locally created: nothing has acknowledged it yet.
             delivery: Delivery::Pending,
@@ -130,17 +154,50 @@ impl LxmfMessage {
         self
     }
 
-    /// Pack the message into its serialised form, signing with `source`.
+    /// Attach a stamp to this message.
     ///
-    /// This computes the message hash and Ed25519 signature. The returned
-    /// bytes are ready to transmit over a link or packet.
-    pub fn pack(&mut self, source: &PrivateIdentity) -> Result<Vec<u8>, LxmfError> {
-        let payload = vec![
+    /// Must be called after [`LxmfMessage::pack`] has computed [`Self::hash`],
+    /// since the stamp is derived from it. Re-pack afterwards to put the stamp
+    /// on the wire; the message hash is unchanged by the stamp.
+    pub fn set_stamp(&mut self, stamp: [u8; STAMP_LENGTH], value: u64) {
+        self.stamp = Some(stamp);
+        self.stamp_value = Some(value);
+        self.stamp_valid = Some(true);
+    }
+
+    /// Verify this message's stamp against a cost the sender had to meet.
+    ///
+    /// Costs a 768 KB workblock to build, so it is never done implicitly: a
+    /// device receiving messages should only pay this when it actually intends
+    /// to act on the result. Returns `None` when the message carries no stamp.
+    pub fn check_stamp(&mut self, target_cost: u8) -> Option<bool> {
+        let stamp = self.stamp?;
+        let digest = crate::stamper::workblock_digest(&self.hash, &stamp);
+        let valid = crate::stamper::leading_zero_bits(&digest) >= target_cost as u64;
+        self.stamp_valid = Some(valid);
+        if valid {
+            self.stamp_value = Some(crate::stamper::leading_zero_bits(&digest));
+        }
+        Some(valid)
+    }
+
+    /// The payload this message hashes over: four elements, no stamp.
+    fn payload_values(&self) -> Vec<Value> {
+        vec![
             Value::F64(self.timestamp),
             Value::Binary(self.title.clone()),
             Value::Binary(self.content.clone()),
             self.fields.clone(),
-        ];
+        ]
+    }
+
+    /// Pack the message into its serialised form, signing with `source`.
+    ///
+    /// This computes the message hash and Ed25519 signature. If a stamp has
+    /// been attached with [`LxmfMessage::set_stamp`] it is appended as a fifth
+    /// payload element; it is not part of what is hashed or signed.
+    pub fn pack(&mut self, source: &PrivateIdentity) -> Result<Vec<u8>, LxmfError> {
+        let payload = self.payload_values();
         let packed_payload = rmp_serde::to_vec(&payload)?;
 
         let mut hashed_part = Vec::with_capacity(2 * DESTINATION_HASH_LENGTH + packed_payload.len());
@@ -156,6 +213,17 @@ impl LxmfMessage {
         let signature = source.sign(&signed_part).to_bytes();
         self.signature = signature;
         self.signature_validated = true;
+
+        // The wire form carries the stamp as a fifth element, but the hash and
+        // signature above are taken over the four-element form only.
+        let packed_payload = match self.stamp {
+            Some(stamp) => {
+                let mut with_stamp = payload;
+                with_stamp.push(Value::Binary(stamp.to_vec()));
+                rmp_serde::to_vec(&with_stamp)?
+            }
+            None => packed_payload,
+        };
 
         let mut packed = Vec::with_capacity(
             2 * DESTINATION_HASH_LENGTH + SIGNATURE_LENGTH + packed_payload.len(),
@@ -191,7 +259,18 @@ impl LxmfMessage {
         if payload.len() < 4 {
             return Err(LxmfError::MalformedPayload);
         }
-        // Optional stamp appended as a 5th element; not used by this client.
+        // An optional stamp arrives as a 5th element. It is read and kept, then
+        // dropped from the payload so the hash below is taken over the
+        // four-element form — which is what the sender hashed and what the
+        // reference does, so both sides agree.
+        let stamp = match payload.get(4) {
+            Some(Value::Binary(b)) if b.len() == crate::stamper::STAMP_LEN => {
+                let mut stamp = [0u8; crate::stamper::STAMP_LEN];
+                stamp.copy_from_slice(b);
+                Some(stamp)
+            }
+            _ => None,
+        };
         if payload.len() > 4 {
             payload.truncate(4);
         }
@@ -234,6 +313,12 @@ impl LxmfMessage {
             hash,
             signature,
             signature_validated,
+            // A received stamp is recorded but not verified: checking costs a
+            // 768 KB workblock, and a client that does not enforce stamps gains
+            // nothing from checking them.
+            stamp,
+            stamp_value: None,
+            stamp_valid: None,
             incoming: true,
             // Received, so it demonstrably arrived; there is nothing pending.
             delivery: Delivery::Acknowledged,
@@ -346,6 +431,114 @@ mod tests {
         let recall = |_h: &[u8; 16]| Some(*sender.as_identity());
         let unpacked = LxmfMessage::unpack(&packed, &recall).unwrap();
         assert!(!unpacked.signature_validated);
+    }
+
+    async fn stampper_work(message_id: &[u8; 32], cost: u8) -> (Vec<u8>, u64) {
+        let mut rng = rand_core::UnwrapErr(getrandom::SysRng);
+        let work = crate::stamper::StampWork::new(message_id).await;
+        let stamp = work
+            .generate(cost, &mut rng, 0, |_| false)
+            .await
+            .expect("stamp found");
+        (stamp.bytes().to_vec(), stamp.value)
+    }
+
+    #[tokio::test]
+    async fn a_stamp_survives_a_round_trip() {
+        let sender = identity();
+        let recipient = identity();
+
+        let mut msg = LxmfMessage::new(
+            address_hash(&recipient),
+            address_hash(&sender),
+            b"t".as_slice(),
+            b"c".as_slice(),
+        );
+        // First pack computes the hash the stamp is derived from.
+        msg.pack(&sender).unwrap();
+        let hash_before = msg.hash;
+
+        let (stamp, value) = stampper_work(&msg.hash, 6).await;
+        let stamp: [u8; crate::stamper::STAMP_LEN] = stamp.try_into().unwrap();
+        msg.set_stamp(stamp, value);
+        let packed = msg.pack(&sender).unwrap();
+
+        // The stamp must not change what is hashed, or the receiver would
+        // recompute a different hash and reject the signature.
+        assert_eq!(msg.hash, hash_before, "a stamp must not alter the hash");
+
+        let recall = |_h: &[u8; 16]| Some(*sender.as_identity());
+        let mut unpacked = LxmfMessage::unpack(&packed, &recall).unwrap();
+
+        assert_eq!(unpacked.hash, hash_before);
+        assert!(unpacked.signature_validated, "signature must still validate");
+        assert_eq!(unpacked.stamp, Some(stamp));
+        assert_eq!(unpacked.stamp_value, None, "not verified on receipt");
+        assert_eq!(unpacked.check_stamp(6), Some(true));
+        assert_eq!(unpacked.check_stamp(64), Some(false));
+    }
+
+    #[test]
+    fn an_unstamped_message_reports_no_stamp() {
+        let sender = identity();
+        let recipient = identity();
+        let mut msg = LxmfMessage::new(
+            address_hash(&recipient),
+            address_hash(&sender),
+            b"t".as_slice(),
+            b"c".as_slice(),
+        );
+        let packed = msg.pack(&sender).unwrap();
+        let mut unpacked = LxmfMessage::unpack(&packed, &|_| None).unwrap();
+        assert_eq!(unpacked.stamp, None);
+        assert_eq!(unpacked.check_stamp(8), None);
+    }
+
+    #[test]
+    fn a_malformed_stamp_is_ignored_rather_than_fatal() {
+        // A wrong-length 5th element must not stop the message being read.
+        let sender = identity();
+        let recipient = identity();
+        let mut msg = LxmfMessage::new(
+            address_hash(&recipient),
+            address_hash(&sender),
+            b"t".as_slice(),
+            b"c".as_slice(),
+        );
+        let packed = msg.pack(&sender).unwrap();
+
+        let fixed = 2 * DESTINATION_HASH_LENGTH + SIGNATURE_LENGTH;
+        let mut payload: Vec<Value> = rmp_serde::from_slice(&packed[fixed..]).unwrap();
+        payload.push(Value::Binary(vec![0xAA; 7]));
+        let mut tampered = packed[..fixed].to_vec();
+        tampered.extend_from_slice(&rmp_serde::to_vec(&payload).unwrap());
+
+        let unpacked = LxmfMessage::unpack(&tampered, &|_| None).unwrap();
+        assert_eq!(unpacked.stamp, None, "a 7-byte stamp is not a stamp");
+        assert_eq!(unpacked.content_string(), "c");
+    }
+
+    #[tokio::test]
+    async fn the_stamp_is_outside_the_signed_region() {
+        // Same signature either way: the stamp is transport metadata, not
+        // something the sender commits to.
+        let sender = identity();
+        let recipient = identity();
+        let mut msg = LxmfMessage::new(
+            address_hash(&recipient),
+            address_hash(&sender),
+            b"t".as_slice(),
+            b"c".as_slice(),
+        );
+        let plain = msg.pack(&sender).unwrap();
+        let signature_without_stamp = msg.signature;
+
+        let (stamp, value) = stampper_work(&msg.hash, 5).await;
+        msg.set_stamp(stamp.try_into().unwrap(), value);
+        let stamped = msg.pack(&sender).unwrap();
+
+        assert_eq!(msg.signature, signature_without_stamp);
+        assert_ne!(plain, stamped, "the stamped form must be larger on the wire");
     }
 
     #[test]

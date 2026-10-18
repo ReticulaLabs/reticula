@@ -184,10 +184,9 @@ impl ChatListScreen {
                 break;
             }
             let marker = if conv.unread > 0 { " *" } else { "" };
-            // A peer that requires LXMF stamps cannot be sent to by this
-            // client. Flag it in the list, so it is not discovered as a
-            // dead end only after a message has been written.
-            let stamp_marker = if conv.stamp_cost.is_some() { " [!]" } else { "" };
+            // Peers within this client's stamping ceiling are sent to
+            // normally, so only one we will refuse is worth flagging here.
+            let stamp_marker = if conv.stamp_cost_unmet { " [!]" } else { "" };
             let preview = widgets::truncate(
                 if conv.last_content.is_empty() {
                     &conv.last_title
@@ -313,6 +312,7 @@ mod tests {
             peer_name: "Pepper".to_string(),
             last_content: "hi".to_string(),
             stamp_cost,
+            stamp_cost_unmet: stamp_cost.is_some_and(|c| c > 16),
             ..Default::default()
         }];
         let ctx = ViewContext {
@@ -329,12 +329,21 @@ mod tests {
     }
 
     #[test]
-    fn a_stamp_requiring_peer_is_marked_in_the_list() {
+    fn a_peer_demanding_too_much_stamping_is_marked_in_the_list() {
         // The failure this prevents is invisible until the user opens the
         // chat and composes a message, so the list has to say it up front.
         assert!(
-            renders_stamp_marker(Some(8)),
-            "a peer requiring stamps must be flagged in the list"
+            renders_stamp_marker(Some(64)),
+            "a peer demanding more stamping than we will pay must be flagged"
+        );
+    }
+
+    #[test]
+    fn a_peer_within_the_stamping_ceiling_is_not_marked() {
+        // We stamp these automatically, so flagging them would be noise.
+        assert!(
+            !renders_stamp_marker(Some(8)),
+            "a peer we can stamp for must not be flagged"
         );
     }
 

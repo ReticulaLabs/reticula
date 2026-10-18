@@ -17,7 +17,7 @@ embuild = { version = "0.31", features = ["espidf"] }
 
 [dependencies]
 reticula-hal = { path = "../reticula-hal" }
-reticulum-sdk = { version = "2.3", default-features = false, features = ["alloc", "lora"] }
+reticulum-sdk = { version = "2.3.9", default-features = false, features = ["alloc", "lora"] }
 embedded-graphics = "0.8"
 mipidsi = "0.10"
 embedded-hal = "1.0"

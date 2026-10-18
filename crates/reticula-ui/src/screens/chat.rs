@@ -243,29 +243,42 @@ impl ChatScreen {
             .send_failure
             .filter(|f| f.peer == self.peer)
             .map(|f| f.reason.as_str());
-        // A peer that demands LXMF stamps cannot be sent to at all. Say so here
-        // rather than leaving the composer looking usable: without this, the
-        // only sign is a refusal after the fact, on a message the user believed
-        // was going out.
-        let stamp_cost = ctx
+        // Messages to a stamping peer are stamped automatically, so the only
+        // stamp condition worth interrupting the user for is one we will
+        // refuse: without this, the send just fails on a message the user
+        // believed was going out.
+        let unmet = ctx
             .conversations
             .iter()
             .find(|c| c.peer == self.peer)
+            .filter(|c| c.stamp_cost_unmet)
             .and_then(|c| c.stamp_cost);
+        // Stamp production is proof-of-work at a cost the *receiver* chose, so
+        // it can stall for seconds on a slow device. Animate the dots so it is
+        // obvious the work is still progressing rather than finished-but-stuck.
+        let busy = ctx
+            .stamping
+            .filter(|s| s.peer == self.peer)
+            .map(|s| {
+                let dots = ".".repeat(1 + ((ctx.network.uptime_ms / 400) % 3) as usize);
+                format!("Stamping cost {} {dots}", s.cost)
+            });
+
         let room = theme.chars_per_line(width - hops_w - 2);
-        let (status, dim) = match (error, stamp_cost) {
-            (Some(e), _) => {
+        let (status, dim) = match (error, busy, unmet) {
+            (Some(e), _, _) => {
                 let prefix = "Not sent: ";
                 (
                     widgets::truncate(&format!("{prefix}{e}"), room.saturating_sub(prefix.len())),
                     theme.danger,
                 )
             }
-            (None, Some(cost)) => (
-                widgets::truncate(&format!("Needs LXMF stamps (cost {cost})"), room),
+            (None, Some(busy), _) => (widgets::truncate(&busy, room), theme.warning),
+            (None, None, Some(cost)) => (
+                widgets::truncate(&format!("Peer needs too much stamping ({cost})"), room),
                 theme.warning,
             ),
-            (None, None) => (
+            (None, None, None) => (
                 widgets::truncate("ENTER send | PgUp/PgDn scroll", room),
                 theme.text_dim,
             ),
@@ -288,7 +301,7 @@ fn hex_prefix(peer: &[u8; 16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::{ChatMessage, Conversation, Delivery, SendFailure};
+    use crate::context::{ChatMessage, Conversation, Delivery, SendFailure, Stamping};
     use crate::testing::Recorder;
     use crate::context::ViewContext;
     use crate::theme::Theme;
@@ -322,6 +335,23 @@ mod tests {
             conversations: contacts,
             ..ViewContext::default()
         }
+    }
+
+    fn with_stamping<'a>(
+        messages: &'a [ChatMessage],
+        stamping: Option<&'a Stamping>,
+    ) -> ViewContext<'a> {
+        ViewContext {
+            messages,
+            stamping,
+            ..ViewContext::default()
+        }
+    }
+
+    /// Whether the bottom status line was drawn in `color`.
+    fn status_line(target: &Recorder, color: Rgb565, theme: &Theme) -> bool {
+        let y = target.status_y(theme);
+        target.contains_in_rows(y..y + theme.line_h, color)
     }
 
     #[test]
@@ -418,14 +448,92 @@ mod tests {
     }
 
     #[test]
-    fn a_stamp_requiring_peer_is_flagged_before_composing() {
-        // The whole point of detecting the stamp cost: the composer must not
-        // look usable for a peer this client cannot send to.
+    fn a_stamp_in_progress_is_shown_in_the_status_line() {
+        // Proof-of-work at a receiver-chosen cost can stall for seconds on a
+        // T-Deck. Without this the pause is indistinguishable from a hang.
+        let theme = Theme::default();
+        let messages: [ChatMessage; 0] = [];
+        let stamping = Stamping { peer: [1u8; 16], cost: 8 };
+        let mut target = Recorder::new(320, 240);
+        ChatScreen::new([1u8; 16]).render(
+            &mut target,
+            &with_stamping(&messages, Some(&stamping)),
+            &theme,
+        );
+
+        assert!(
+            status_line(&target, theme.warning, &theme),
+            "an in-flight stamp must be announced in the warning colour"
+        );
+        assert!(
+            !status_line(&target, theme.text_dim, &theme),
+            "the idle hint must be replaced, not shown alongside"
+        );
+    }
+
+    #[test]
+    fn a_stamp_indicator_is_scoped_to_its_own_peer() {
+        let theme = Theme::default();
+        let messages: [ChatMessage; 0] = [];
+        let stamping = Stamping { peer: [9u8; 16], cost: 8 };
+        let mut target = Recorder::new(320, 240);
+        ChatScreen::new([1u8; 16]).render(
+            &mut target,
+            &with_stamping(&messages, Some(&stamping)),
+            &theme,
+        );
+
+        assert!(
+            !status_line(&target, theme.warning, &theme),
+            "another peer's stamp must not show in this chat"
+        );
+    }
+
+    #[test]
+    fn a_send_failure_outranks_a_stamp_indicator() {
+        // If stamping finished but the send then failed, the reason is what the
+        // user needs to read.
+        let theme = Theme::default();
+        let messages: [ChatMessage; 0] = [];
+        let stamping = Stamping { peer: [1u8; 16], cost: 8 };
+        let failure = SendFailure {
+            peer: [1u8; 16],
+            reason: "no path".to_string(),
+        };
+        let ctx = ViewContext {
+            messages: &messages,
+            send_failure: Some(&failure),
+            stamping: Some(&stamping),
+            ..ViewContext::default()
+        };
+        let mut target = Recorder::new(320, 240);
+        ChatScreen::new([1u8; 16]).render(&mut target, &ctx, &theme);
+
+        assert!(status_line(&target, theme.danger, &theme));
+        assert!(!status_line(&target, theme.warning, &theme));
+    }
+
+    #[test]
+    fn no_stamp_indicator_leaves_the_idle_hint() {
+        let theme = Theme::default();
+        let messages: [ChatMessage; 0] = [];
+        let mut target = Recorder::new(320, 240);
+        ChatScreen::new([1u8; 16])
+            .render(&mut target, &with_stamping(&messages, None), &theme);
+
+        assert!(status_line(&target, theme.text_dim, &theme));
+    }
+
+    #[test]
+    fn a_peer_demanding_too_much_stamping_is_flagged_before_composing() {
+        // The composer must not look usable for a peer this client will
+        // refuse to stamp for.
         let theme = Theme::default();
         let messages: [ChatMessage; 0] = [];
         let contacts = [Conversation {
             peer: [1u8; 16],
-            stamp_cost: Some(8),
+            stamp_cost: Some(64),
+            stamp_cost_unmet: true,
             ..Conversation::default()
         }];
         let mut target = Recorder::new(320, 240);
@@ -436,7 +544,7 @@ mod tests {
         );
 
         assert!(
-            target.contains_in_rows(target.status_y(&theme)..target.status_y(&theme) + theme.line_h, theme.warning),
+            status_line(&target, theme.warning, &theme),
             "a peer requiring stamps must be flagged in the warning colour"
         );
     }
@@ -447,7 +555,8 @@ mod tests {
         let messages: [ChatMessage; 0] = [];
         let contacts = [Conversation {
             peer: [9u8; 16], // a different peer than the open chat
-            stamp_cost: Some(8),
+            stamp_cost: Some(64),
+            stamp_cost_unmet: true,
             ..Conversation::default()
         }];
         let mut target = Recorder::new(320, 240);
@@ -471,12 +580,13 @@ mod tests {
         let messages: [ChatMessage; 0] = [];
         let contacts = [Conversation {
             peer: [1u8; 16],
-            stamp_cost: Some(8),
+            stamp_cost: Some(64),
+            stamp_cost_unmet: true,
             ..Conversation::default()
         }];
         let failure = SendFailure {
             peer: [1u8; 16],
-            reason: "peer requires LXMF stamps (cost 8)".to_string(),
+            reason: "peer needs stamps 64 (max 16)".to_string(),
         };
         let mut target = Recorder::new(320, 240);
         ChatScreen::new([1u8; 16]).render(
@@ -486,7 +596,7 @@ mod tests {
         );
 
         assert!(
-            target.contains_in_rows(target.status_y(&theme)..target.status_y(&theme) + theme.line_h, theme.danger),
+            status_line(&target, theme.danger, &theme),
             "the refusal reason must be shown"
         );
     }

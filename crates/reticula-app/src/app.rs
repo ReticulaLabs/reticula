@@ -27,7 +27,7 @@ use reticula_nomad::client::DEFAULT_PAGE_PATH;
 use reticula_nomad::{NomadClient, NomadEvent, Page};
 use reticula_ui::context::{
     ChatMessage, Conversation, Delivery as ChatDelivery, NetworkState, NodeEntry, SendFailure,
-    ViewContext,
+    Stamping, ViewContext,
 };
 use reticula_ui::screens::chat::ChatScreen;
 use reticula_ui::screens::chat_list::ChatListScreen;
@@ -47,6 +47,15 @@ use reticula_ui::{
 };
 
 use crate::config::NetConfig;
+
+/// Ring capacity of the transport's announce broadcast channel.
+///
+/// Every announce the transport accepts passes through here, and a receiver that
+/// falls behind loses them silently. The value is a memory trade-off (see the
+/// SDK default note at the use site), so it is logged at startup: when a device
+/// reports `fell behind the announce stream`, this is the number to check
+/// first, and lowering it deliberately is how that path gets exercised.
+const ANNOUNCE_CHANNEL_CAPACITY: usize = 512;
 
 /// Frame pacing of the UI loop.
 /// Frame/input poll interval. Kept short so the trackball (polled here) picks
@@ -167,6 +176,9 @@ struct SharedState {
     /// pressed and the transfer runs on a background task, so without this the
     /// message would silently vanish with no trace.
     send_failure: std::sync::Mutex<Option<SendFailure>>,
+    /// An in-flight stamp, so a chat can show that the pause is proof-of-work
+    /// rather than a hang. Only one send is ever in flight at a time.
+    stamping: std::sync::Mutex<Option<Stamping>>,
     connected: AtomicBool,
     peer_links: AtomicU32,
 }
@@ -680,6 +692,7 @@ impl<B: Board> ReticulaApp<B> {
                 self.refresh_messages();
             }
 LxmfEvent::ContactDiscovered { address, name, hops, stamp_cost } => {
+                let stamp_cost_unmet = self.cost_is_unmet(stamp_cost);
                 let mut contacts = self.shared.contacts.lock().unwrap();
                 match contacts.iter_mut().find(|c| c.peer == address) {
                     // A re-announce may report a better (shorter) path, or a
@@ -687,6 +700,7 @@ LxmfEvent::ContactDiscovered { address, name, hops, stamp_cost } => {
                     Some(existing) => {
                         existing.hops = Some(hops);
                         existing.stamp_cost = stamp_cost;
+                        existing.stamp_cost_unmet = stamp_cost_unmet;
                     }
                     None => {
                         let name = name.unwrap_or_default();
@@ -700,12 +714,17 @@ LxmfEvent::ContactDiscovered { address, name, hops, stamp_cost } => {
                             last_ts: 0.0,
                             hops: Some(hops),
                             stamp_cost,
+                            stamp_cost_unmet,
                         });
                         info!("reticula: discovered LXMF contact {address:02x?}");
-                        if let Some(cost) = stamp_cost {
-                            warn!(
-                                "reticula: contact {address:02x?} requires LXMF stamps (cost {cost}); it cannot be sent to"
-                            );
+                        match (stamp_cost, stamp_cost_unmet) {
+                            (Some(cost), false) => info!(
+                                "reticula: contact {address:02x?} requires cost-{cost} stamps; messages will be stamped"
+                            ),
+                            (Some(cost), true) => warn!(
+                                "reticula: contact {address:02x?} demands cost-{cost} stamps, above this client's ceiling; it cannot be sent to"
+                            ),
+                            _ => {}
                         }
                     }
                 }
@@ -722,6 +741,17 @@ LxmfEvent::ContactDiscovered { address, name, hops, stamp_cost } => {
                 // The peer acknowledged the bytes; redraw so the message stops
                 // being shown as pending.
                 self.refresh_messages();
+            }
+            LxmfEvent::StampingStarted { peer, cost } => {
+                *self.shared.stamping.lock().unwrap() = Some(Stamping { peer, cost });
+            }
+            LxmfEvent::StampingFinished { peer } => {
+                let mut stamping = self.shared.stamping.lock().unwrap();
+                // Only clear our own; a send for another peer must not cancel
+                // this one's indicator.
+                if stamping.as_ref().is_some_and(|s| s.peer == peer) {
+                    *stamping = None;
+                }
             }
             LxmfEvent::DeliveryStateChanged { .. } => {
                 // `Sent` and `Failed` are applied to the store without a
@@ -755,6 +785,15 @@ LxmfEvent::ContactDiscovered { address, name, hops, stamp_cost } => {
         }
     }
 
+    /// Whether a peer's announced stamp cost is one this client will refuse.
+    ///
+    /// A cost within the ceiling needs no attention: messages to that peer are
+    /// stamped automatically. Only a cost we will not pay is worth interrupting
+    /// the user for, because the send will fail.
+    fn cost_is_unmet(&self, stamp_cost: Option<u64>) -> bool {
+        stamp_cost.is_some_and(|cost| cost > self.lxmf.max_stamp_cost() as u64)
+    }
+
     /// Rebuild the conversation list from the message store.
     fn refresh_conversations(&self) {
         let store = self.store.lock().unwrap();
@@ -785,6 +824,7 @@ LxmfEvent::ContactDiscovered { address, name, hops, stamp_cost } => {
         let mut name_by_peer: HashMap<[u8; 16], String> = HashMap::new();
         let mut hops_by_peer: HashMap<[u8; 16], u8> = HashMap::new();
         let mut stamp_cost_by_peer: HashMap<[u8; 16], u64> = HashMap::new();
+        let mut unmet_by_peer: HashMap<[u8; 16], bool> = HashMap::new();
         {
             let contacts = self.shared.contacts.lock().unwrap();
             for c in contacts.iter() {
@@ -797,6 +837,7 @@ LxmfEvent::ContactDiscovered { address, name, hops, stamp_cost } => {
                 if let Some(cost) = c.stamp_cost {
                     stamp_cost_by_peer.insert(c.peer, cost);
                 }
+                unmet_by_peer.insert(c.peer, c.stamp_cost_unmet);
                 by_peer.entry(c.peer).or_insert_with(|| {
                     (
                         c.last_content.clone(),
@@ -820,6 +861,7 @@ LxmfEvent::ContactDiscovered { address, name, hops, stamp_cost } => {
                 last_ts,
                 hops: hops_by_peer.get(&peer).copied(),
                 stamp_cost: stamp_cost_by_peer.get(&peer).copied(),
+                stamp_cost_unmet: unmet_by_peer.get(&peer).copied().unwrap_or(false),
             })
             .collect();
         conversations.sort_by(|a, b| {
@@ -908,12 +950,14 @@ LxmfEvent::ContactDiscovered { address, name, hops, stamp_cost } => {
         let page_node = shared.page_node.lock().unwrap();
         let page_notice = shared.page_notice.lock().unwrap();
         let send_failure = shared.send_failure.lock().unwrap();
+        let stamping = shared.stamping.lock().unwrap();
 
         let ctx = ViewContext {
             conversations: &conversations,
             messages: &messages,
             nodes: &nodes,
             send_failure: send_failure.as_ref(),
+            stamping: stamping.as_ref(),
             page: page.as_ref(),
             page_node: page_node.as_ref(),
             page_notice: &page_notice,
@@ -972,7 +1016,8 @@ async fn build_transport(
     // The SDK default of 16384 pre-allocates ~8.6 MB per broadcast channel
     // (7 channels), which exceeds the T-Deck's 8 MB PSRAM. The end-client is
     // low-throughput, so a small ring is plenty.
-    config.set_event_channel_capacity(512);
+    config.set_event_channel_capacity(ANNOUNCE_CHANNEL_CAPACITY);
+    info!("reticula: announce channel capacity {ANNOUNCE_CHANNEL_CAPACITY}");
     // Prove received link data messages (per-message acknowledgements sent
     // back over the same link). The reference LXMF delivery destination always
     // proves link-delivered messages, and senders rely on those proofs to

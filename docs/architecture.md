@@ -90,8 +90,8 @@ implementation exactly:
 ```
 packed = destination_hash(16) ‖ source_hash(16)
        ‖ ed25519_signature(64)
-       ‖ msgpack([timestamp, title, content, fields])
-hash   = SHA256(destination ‖ source ‖ packed_payload)
+       ‖ msgpack([timestamp, title, content, fields, stamp?])
+hash   = SHA256(destination ‖ source ‖ msgpack([timestamp, title, content, fields]))
 sign   = ed25519(source_key, hashed_part ‖ hash)
 ```
 
@@ -100,6 +100,95 @@ Delivery for the MVP is **DIRECT**: the client packs the message, establishes
 Inbound messages arrive as link data and are validated against the source
 identity recalled from announces. The `MessageStore` is bounded (512 messages)
 and groups messages per peer for the conversation list.
+
+#### Stamping
+
+A receiver announces the **stamp cost** it demands. A message arriving without a
+stamp worth that cost is dropped by the reference router *after* the link layer
+has already proved it, so the sender sees a successful transfer and the message
+simply never appears — which is exactly how a stamping peer looks broken.
+
+`reticula-lxmf::stamper` therefore generates the stamp a demanding peer asks
+for. An identity stamp is not a signature: it is 32 bytes of brute-forced
+randomness such that `SHA256(workblock ‖ stamp)` has at least `cost` leading
+zero bits, where the workblock is 3000 rounds of HKDF-SHA256 over the message
+hash — 768 000 bytes. Because SHA-256 is Merkle–Damgård, that workblock's
+compression state is retained and each candidate costs one extra 64-byte block,
+so a cost-16 stamp is tens of thousands of blocks rather than tens of
+gigabytes.
+
+The cost is chosen by the receiver and is therefore attacker-controlled, so
+`DEFAULT_MAX_STAMP_COST` (16) caps what this client will spend; a peer demanding
+more is refused with `StampCostTooHigh` and flagged in the UI rather than being
+allowed to pin the CPU.
+
+Stamping is CPU-bound and runs cooperatively on the sending task. Yielding to the
+Tokio scheduler alone is **not** sufficient on the ESP32: `yield_now()` returns
+control to Tokio, which immediately reschedules the same task, so the enclosing
+FreeRTOS task never blocks and the idle task that feeds the task watchdog never
+runs. A proof of work long enough to do that trips `task_wdt` and dumps a
+backtrace — the device survives and the stamp still completes, so it looks like
+harmless noise while burning the watchdog margin. Work therefore parks on a timer
+once a stretch exceeds `MAX_WORK_SLICE`, which lets the idle task run.
+
+A stamping cost is learned from a peer's announce app-data, and an announce that
+carries *nothing* must not be read as "this peer no longer requires stamps". That
+distinction is load-bearing: the client asks for paths whenever a destination
+entry has been pruned — aggressively on embedded targets, where entries expire
+after 120 s, and so most often over LoRa — and the answer arrives as a path
+response announce. Treating that silence as a downgrade discarded what the peer's
+real announce had said, and the *next* message went out unstamped and was
+dropped. A current-format blob is always authoritative (a non-integer cost
+element, including the `Nil` most clients announce, means "no stamps required");
+only an absent or pre-0.5.0 blob says nothing, and previously known state is kept.
+
+This still matters even though `reticulum-sdk` 2.3.9 fixed the underlying
+divergence: until 2.3.9 the SDK answered a path request for a destination it
+owned with an app-data-less announce, where the reference attaches the
+destination's `default_app_data`. Peers running older SDK builds will keep doing
+so indefinitely, and non-SDK peers are unaffected by the fix either way.
+
+The transport only emits an announce event when the path actually *improves*, so
+a peer's periodic re-announce on an already-known path produces no event at all.
+Requirements therefore have to be learned from the first announce, and two things
+can lose that:
+
+- **Falling behind the announce stream.** It is a bounded broadcast channel (512
+  on the device, against the SDK's 16384 default), and a busy mesh overflows it.
+  A receiver that has missed events reports `Lagged`, which a `while let Ok(..)`
+  loop reads as end-of-stream; discovery would then stop for the whole session,
+  silently, because the task returns `Ok`. Every later message would go out
+  unstamped and still be reported as sent.
+- **A missed first announce**, which nothing ever repeats.
+
+Both are covered by the same recovery: a send to a peer with no announce on
+record asks for a path first and waits up to `LOOKUP_TIMEOUT` for the answer.
+A path response carries the same app data as a full announce, so this works for
+peers on SDK 2.3.9+ and for the reference. The record distinguishes "announced
+no cost" from "never heard": `stamp_costs` holds `Option<u64>`, and only an
+absent entry triggers a lookup, so a peer that has answered costs nothing.
+
+In the other direction, `LxmfClient::announce` now sets the delivery
+destination's default app data as well as passing it explicitly, so the path
+response we answer a peer's path request with carries the same blob as a full
+announce. Without it we were visible only as an address hash to a peer that had
+just lost our path.
+
+The same `Lagged` hazard applies to `reticula-nomad`'s node discovery, and is
+fixed the same way. The app's own event drain is *not* affected: it runs inside
+`while !self.quit`, so a lagged tick only skips one iteration's events and the
+next tick resumes from the oldest retained message.
+
+`ANNOUNCE_CHANNEL_CAPACITY` (512, against the SDK's 16384 default, which would
+pre-allocate more than the T-Deck's PSRAM) is the number that determines whether
+any of this happens on the device, so it is logged at startup. It is the first
+thing to check when a device reports falling behind.
+
+**Not implemented**: tickets. A receiver that trusts a sender issues a ticket,
+which is accepted at any cost with no proof-of-work at all, and would remove the
+768 KB workblock from the common case once trust is established.
+`stamper::ticket_stamp` computes one, but the client neither issues nor consumes
+them yet.
 
 ### NomadNet
 

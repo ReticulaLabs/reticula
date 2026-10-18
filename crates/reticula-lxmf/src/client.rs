@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use log::{debug, info, trace, warn};
+use rand_core::UnwrapErr;
 use rmpv::Value;
 use sha2::Digest;
 use tokio::sync::broadcast::error::RecvError;
@@ -19,6 +20,7 @@ use reticulum_sdk::identity::{HashIdentity, PrivateIdentity};
 use reticulum_sdk::transport::{AnnounceEvent, ReceivedData, Transport};
 
 use crate::message::{Delivery, LxmfMessage};
+use crate::stamper::{self, Stamp, DEFAULT_MAX_STAMP_COST};
 use crate::store::{Direction, MessageStore};
 use crate::LxmfError;
 
@@ -69,6 +71,13 @@ pub const PENDING_PROOF_TTL: Duration = Duration::from_secs(300);
 /// its message before being given up on.
 pub const PENDING_PROOF_RETRY_DELAY: Duration = Duration::from_millis(50);
 const PENDING_PROOF_RETRIES: usize = 10;
+
+/// How long a send waits for a peer we have never heard from to answer a path
+/// request with the requirements it announced.
+///
+/// Only reached for peers with no announce on record, and only once, since the
+/// answer — including "no stamps required" — is recorded like any other.
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How a peer was observed to be reachable.
 #[derive(Debug, Clone, Copy)]
@@ -139,6 +148,15 @@ pub enum LxmfEvent {
     /// application sees the payload. A peer configured to require LXMF stamps
     /// issues this proof and then discards the message anyway.
     Acknowledged([u8; 32]),
+    /// Producing an LXMF stamp for an outbound message has started.
+    ///
+    /// Stamping is proof-of-work: the peer chose the cost and this client has
+    /// to find a nonce whose hash carries that many leading zero bits. It is
+    /// fast on a desktop and slow enough on a T-Deck to look like a hang, so it
+    /// is reported rather than left as unexplained silence.
+    StampingStarted { peer: [u8; 16], cost: u8 },
+    /// Stamp production finished, whether it succeeded or not.
+    StampingFinished { peer: [u8; 16] },
     /// A sent message changed delivery state.
     ///
     /// Emitted for every transition the user can observe, including the ones
@@ -192,7 +210,13 @@ pub struct LxmfClient {
     /// Only peers that demand a non-zero cost are recorded, so an absent entry
     /// means "accepts unstamped messages" — the common case, and the one that
     /// needs no bookkeeping.
-    stamp_costs: Mutex<HashMap<AddressHash, u64>>,
+    stamp_costs: Mutex<HashMap<AddressHash, Option<u64>>>,
+    /// Highest stamp cost this client will pay to satisfy a peer.
+    ///
+    /// A receiver chooses its own cost, and the cost *is* the number of leading
+    /// zero bits demanded, so a peer can ask for arbitrarily much work. This
+    /// ceiling is what stops that from becoming a way to pin the radio stack.
+    max_stamp_cost: u8,
     /// Messages that were handed to the transport but not yet confirmed,
     /// keyed by the transport packet hash whose proof will confirm them, with
     /// the time the entry was created so unanswered entries can be pruned.
@@ -233,6 +257,7 @@ impl LxmfClient {
             peer_ifaces: std::sync::Mutex::new(HashMap::new()),
             discovered: Mutex::new(Vec::new()),
             stamp_costs: Mutex::new(HashMap::new()),
+            max_stamp_cost: DEFAULT_MAX_STAMP_COST,
             pending_proofs: Mutex::new(HashMap::new()),
             seen: Mutex::new(VecDeque::new()),
         }
@@ -264,11 +289,30 @@ impl LxmfClient {
         *self.display_name.lock().unwrap() = name.into();
     }
 
+    /// The app data this destination publishes, both in a full announce and in
+    /// the path response we answer a peer's path request with.
+    ///
+    /// The two have to be the same blob. A peer that asks us for a path has
+    /// usually just lost its own entry for our destination, so the path
+    /// response is all it gets to learn us from; if that carried no app data,
+    /// the peer would see us as an unnamed contact with no way to discover our
+    /// stamp requirements until our next periodic announce.
+    async fn publish_app_data(&self) -> Vec<u8> {
+        let app_data = delivery_app_data(Some(&self.display_name.lock().unwrap()));
+        self.delivery
+            .lock()
+            .await
+            .set_default_app_data(Some(app_data.clone()));
+        app_data
+    }
+
     /// Announce the delivery identity so peers can discover a path to us.
     pub async fn announce(&self) {
-        let app_data = delivery_app_data(Some(&self.display_name.lock().unwrap()));
-        let address = self.delivery.lock().await.desc.address_hash;
-        info!("lxmf: announcing delivery destination {address}");
+        let app_data = self.publish_app_data().await;
+        info!(
+            "lxmf: announcing delivery destination {}",
+            self.delivery_address
+        );
         self.transport
             .send_announce(&self.delivery, Some(&app_data))
             .await;
@@ -324,36 +368,91 @@ impl LxmfClient {
     /// `None` means the peer accepts unstamped messages, or that no announce
     /// from it has been seen yet.
     pub async fn stamp_cost(&self, peer: AddressHash) -> Option<u64> {
-        self.stamp_costs.lock().await.get(&peer).copied()
+        self.stamp_costs.lock().await.get(&peer).copied().flatten()
     }
 
-    /// Record the stamp cost from a peer announce, dropping any stale entry.
+    /// Whether this peer has ever announced its requirements to us.
     ///
-    /// Re-announced on a timer, so this is also how a peer that *lowers* its
-    /// stamp cost is noticed.
+    /// Distinct from "announces no cost": a peer that told us it needs no
+    /// stamps has answered the question, and must not be asked again. One we
+    /// have never heard from has not, and sending to it unstamped is a guess.
+    pub async fn has_announced(&self, peer: AddressHash) -> bool {
+        self.stamp_costs.lock().await.contains_key(&peer)
+    }
+
+    /// The highest stamp cost this client will pay to satisfy a peer.
+    pub fn max_stamp_cost(&self) -> u8 {
+        self.max_stamp_cost
+    }
+
+    /// Record what a peer announce says about stamping.
+    ///
+    /// The entry is recorded even when the answer is "no stamps", because the
+    /// absence of an entry is what marks a peer we have never heard from — see
+    /// [`has_announced`](Self::has_announced). Only call this for an announce
+    /// that authoritatively answered; a blob carrying nothing must leave the
+    /// entry alone rather than downgrade it, see [`Stamping::Unknown`].
+    ///
+    /// Peers re-announce on a timer, so this is also how a peer that *lowers*
+    /// its stamp cost is noticed.
     async fn record_stamp_cost(&self, peer: AddressHash, cost: Option<u64>) {
-        let mut costs = self.stamp_costs.lock().await;
-        match cost {
-            Some(cost) if cost > 0 => {
-                costs.insert(peer, cost);
-            }
-            _ => {
-                costs.remove(&peer);
-            }
-        }
+        let normalized = match cost {
+            Some(cost) if cost > 0 => Some(cost),
+            // An answered "no stamps required", kept as an entry so the peer is
+            // not probed again as though we had never heard from it.
+            _ => None,
+        };
+        self.stamp_costs.lock().await.insert(peer, normalized);
     }
 
     /// The long-running discovery loop. Watches for `lxmf/delivery` announces
     /// so chat contacts show up without requiring an inbound message first.
     pub async fn run_discovery(&self) -> Result<(), LxmfError> {
-        let mut announces = self.transport.recv_announces().await;
-        while let Ok(announce) = announces.recv().await {
+        let announces = self.transport.recv_announces().await;
+        self.watch_announces(announces).await;
+        Ok(())
+    }
+
+    /// Consume the announce stream until the transport closes it.
+    ///
+    /// Falling behind the stream is **not** the end of it. A broadcast
+    /// receiver reports `Lagged` once when it has missed events, and a
+    /// `while let Ok(..)` loop treats that as termination: discovery would stop
+    /// for the rest of the session, silently, because this function returns
+    /// `Ok`. Nothing would ever re-learn a peer's announced requirements
+    /// afterwards either, since the transport only emits an announce event when
+    /// the path actually improves and the peers' periodic re-announces do not.
+    /// Every later message would then go out unstamped and be dropped by a peer
+    /// that requires stamps, while still being reported as sent.
+    async fn watch_announces(&self, mut announces: broadcast::Receiver<AnnounceEvent>) {
+        loop {
+            let announce = match announces.recv().await {
+                Ok(announce) => announce,
+                Err(RecvError::Lagged(missed)) => {
+                    warn!("lxmf: fell behind the announce stream, missed {missed} announce(s)");
+                    continue;
+                }
+                Err(RecvError::Closed) => return,
+            };
             if Self::is_lxmf_delivery(&announce).await {
                 let address = announce.destination.lock().await.desc.address_hash;
                 let fields = delivery_announce_fields(announce.app_data.as_slice());
                 let name = fields.name;
-                let stamp_cost = fields.stamp_cost;
-                self.record_stamp_cost(address, stamp_cost).await;
+                let stamp_cost = match fields.stamping {
+                    Stamping::Required(cost) => {
+                        self.record_stamp_cost(address, Some(cost)).await;
+                        Some(cost)
+                    }
+                    Stamping::NotRequired => {
+                        self.record_stamp_cost(address, None).await;
+                        None
+                    }
+                    // Silence is not a downgrade: keep whatever we last knew.
+                    // See [`Stamping::Unknown`].
+                    // Silence is not a downgrade. Overwriting here is what
+                    // made a stamping peer look like it had stopped asking.
+                    Stamping::Unknown => self.stamp_cost(address).await,
+                };
                 let mut seen = self.discovered.lock().await;
                 if !seen.contains(&address) {
                     seen.push(address);
@@ -377,7 +476,6 @@ impl LxmfClient {
                 }
             }
         }
-        Ok(())
     }
 
     /// Send a message to a peer by LXMF address hash.
@@ -418,9 +516,44 @@ impl LxmfClient {
             title.into().into_bytes(),
             content.into().into_bytes(),
         );
-        let packed = message.pack(&self.identity)?;
-        let hash = message.hash;
+        let mut packed = message.pack(&self.identity)?;
+        let mut hash = message.hash;
         let peer = AddressHash::new(destination_hash);
+
+        // A peer that announces a stamp cost drops unstamped messages at the
+        // application layer, *after* the link layer has proved them — so the
+        // transfer would look like a success and the message would simply never
+        // appear. Prove the work here instead, up to our ceiling.
+        //
+        // Done before the message is stored, because stamping mutates it.
+        let stamping = match self.lookup_stamp_cost(peer).await {
+            Some(cost) if cost > 0 => {
+                let announced = u8::try_from(cost).unwrap_or(u8::MAX);
+                let _ = self.events.send(LxmfEvent::StampingStarted {
+                    peer: destination_hash,
+                    cost: announced,
+                });
+                let outcome = self.stamp_for(&message, cost).await;
+                // Emitted before anything else can fail, so the indicator
+                // always clears even when stamping itself was the problem.
+                let _ = self.events.send(LxmfEvent::StampingFinished {
+                    peer: destination_hash,
+                });
+                match outcome {
+                    Ok(stamp) => {
+                        message.set_stamp(*stamp.bytes(), stamp.value);
+                        // The stamp rides in the payload but not in the hash, so
+                        // re-packing leaves the message hash unchanged.
+                        packed = message.pack(&self.identity)?;
+                        hash = message.hash;
+                        info!("lxmf: stamped for {peer} at value {} (cost {cost})", stamp.value);
+                        None
+                    }
+                    Err(e) => Some(e),
+                }
+            }
+            _ => None,
+        };
 
         // Store the message once, before any transmission attempt. Every
         // attempt re-sends *this* message, so pushing inside the loop would
@@ -430,21 +563,19 @@ impl LxmfClient {
         let stored = self.store.lock().unwrap().push(message, Direction::Outbound);
         let _ = self.events.send(LxmfEvent::MessageSent(stored));
 
-        if let Some(cost) = self.stamp_cost(peer).await {
-            if cost > 0 {
-                let reason = LxmfError::StampsRequired(cost).to_string();
-                warn!("lxmf: refusing to send to {peer}: {reason}");
-                self.store.lock().unwrap().set_delivery(hash, Delivery::Failed);
-                let _ = self.events.send(LxmfEvent::DeliveryStateChanged {
-                    message_id: hash,
-                    state: Delivery::Failed,
-                });
-                let _ = self.events.send(LxmfEvent::Undeliverable {
-                    message_id: hash,
-                    reason: reason.clone(),
-                });
-                return Err(LxmfError::StampsRequired(cost));
-            }
+        if let Some(e) = stamping {
+            let reason = e.to_string();
+            warn!("lxmf: cannot stamp for {peer}: {reason}");
+            self.store.lock().unwrap().set_delivery(hash, Delivery::Failed);
+            let _ = self.events.send(LxmfEvent::DeliveryStateChanged {
+                message_id: hash,
+                state: Delivery::Failed,
+            });
+            let _ = self.events.send(LxmfEvent::Undeliverable {
+                message_id: hash,
+                reason,
+            });
+            return Err(e);
         }
 
         let mut last_error = None;
@@ -502,6 +633,63 @@ impl LxmfClient {
             reason: error.to_string(),
         });
         Err(error)
+    }
+
+    /// The stamp cost `peer` requires, asking it directly if we have never
+    /// heard an announce from it.
+    ///
+    /// Waiting for a peer's next periodic announce is not a recovery plan: the
+    /// transport only emits an announce event when the path actually improves,
+    /// so on a path we already know, a re-announce produces no event at all.
+    /// A path request, by contrast, is answered with a path response, and that
+    /// carries the same app data as a full announce (both carry the
+    /// destination's default app data on reticulum-sdk 2.3.9+).
+    ///
+    /// Bounded by `LOOKUP_TIMEOUT`: a peer that does not answer in time is sent
+    /// to unstamped, exactly as before. Only peers we have never heard from are
+    /// asked, so a peer that has announced "no stamps required" costs nothing.
+    async fn lookup_stamp_cost(&self, peer: AddressHash) -> Option<u64> {
+        if self.has_announced(peer).await {
+            return self.stamp_cost(peer).await;
+        }
+
+        let mut events = self.events.subscribe();
+        self.transport.request_path(&peer, None, None).await;
+
+        let deadline = Instant::now() + LOOKUP_TIMEOUT;
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match timeout(remaining, events.recv()).await {
+                Ok(Ok(LxmfEvent::ContactDiscovered { address, stamp_cost, .. }))
+                    if address.as_slice() == peer.as_slice() =>
+                {
+                    return stamp_cost;
+                }
+                Ok(Ok(_)) | Ok(Err(_)) => continue,
+                Err(_) => break,
+            }
+        }
+
+        self.stamp_cost(peer).await
+    }
+
+    /// Produce a stamp worth at least `cost` for `message`.
+    ///
+    /// The work is CPU-bound, but it is done **cooperatively on the current
+    /// task**, yielding between slices rather than handing it to a blocking
+    /// thread. That is a hard requirement, not a style choice: on the ESP32
+    /// `tokio::task::spawn_blocking` asks FreeRTOS for a new task, which fails
+    /// with "OS can't spawn worker thread" and aborts the firmware. See
+    /// [`stamper::stamp_for`].
+    async fn stamp_for(&self, message: &LxmfMessage, cost: u64) -> Result<Stamp, LxmfError> {
+        // Costs are 1..=254 on the wire; anything else cannot be honoured.
+        let cost = u8::try_from(cost).map_err(|_| LxmfError::StampCostTooHigh {
+            requested: cost,
+            ceiling: self.max_stamp_cost,
+        })?;
+        let mut rng = UnwrapErr(getrandom::SysRng);
+        let stamp = stamper::stamp_for(&message.hash, cost, self.max_stamp_cost, &mut rng).await?;
+        Ok(stamp)
     }
 
     /// Wait for the peer's acknowledgement of `message_hash`.
@@ -1012,12 +1200,31 @@ fn delivery_app_data(display_name: Option<&str>) -> Vec<u8> {
     rmp_serde::to_vec(&data).unwrap_or_default()
 }
 
+/// What an `lxmf/delivery` announce says about a peer's stamping requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stamping {
+    /// A current-format announce said the peer requires stamps of this cost.
+    Required(u64),
+    /// A current-format announce said the peer requires no stamps.
+    NotRequired,
+    /// The announce carried nothing usable, so it says nothing at all.
+    ///
+    /// This case is not hypothetical: the SDK answers a path request for a
+    /// destination it owns with an **app-data-less** announce (it passes `None`
+    /// where the reference passes the recalled app data), and the client asks
+    /// for paths routinely — including on every send to a peer whose destination
+    /// entry has just been pruned. Reading that as "no stamps required" would
+    /// discard what the peer's last real announce told us, so the *next* message
+    /// would go out unstamped and be dropped by the peer.
+    Unknown,
+}
+
 /// The parts of an `lxmf/delivery` announce app-data blob this client uses.
 struct DeliveryAnnounce {
     /// Announced display name, if the peer set a non-empty one.
     name: Option<String>,
-    /// Stamp cost the peer requires from senders. `None` = accepts unstamped.
-    stamp_cost: Option<u64>,
+    /// What the blob said about stamping, if anything.
+    stamping: Stamping,
 }
 
 /// Decode an `lxmf/delivery` announce app-data blob.
@@ -1028,7 +1235,7 @@ struct DeliveryAnnounce {
 /// stamp cost is the only way to know in advance that a peer will silently
 /// discard everything we send it.
 fn delivery_announce_fields(app_data: &[u8]) -> DeliveryAnnounce {
-    let empty = DeliveryAnnounce { name: None, stamp_cost: None };
+    let empty = DeliveryAnnounce { name: None, stamping: Stamping::Unknown };
     if app_data.is_empty() {
         return empty;
     }
@@ -1036,11 +1243,12 @@ fn delivery_announce_fields(app_data: &[u8]) -> DeliveryAnnounce {
     // msgpack fixarray (0x90..=0x9f) or array16 (0xdc).
     let is_list = matches!(app_data[0], 0x90..=0x9f | 0xdc);
     if !is_list {
-        // Legacy format: the display name as raw bytes.
+        // Legacy format: the display name as raw bytes. Says nothing about
+        // stamping, so a previously learned cost is kept.
         let name = String::from_utf8_lossy(app_data).trim().replace('\0', "").trim().to_string();
         return DeliveryAnnounce {
             name: (!name.is_empty()).then_some(name),
-            stamp_cost: None,
+            stamping: Stamping::Unknown,
         };
     }
 
@@ -1060,19 +1268,22 @@ fn delivery_announce_fields(app_data: &[u8]) -> DeliveryAnnounce {
         _ => None,
     };
 
-    // A cost of 0 (or a negative/oversized value) means "no stamps required",
-    // which is the same as not announcing one at all.
-    let stamp_cost = match items.get(1) {
-        // Costs are 1..=254; 0, negatives and anything oversized are treated
-        // as "no stamps required", matching the reference decoder.
+    // A current-format blob is authoritative, whatever it says: costs are
+    // 1..=254, and 0, negatives or anything oversized mean "no stamps
+    // required", matching the reference decoder. Anything other than an
+    // integer there is not an answer about stamping at all.
+    // A current-format list is always an answer: the reference reads element 1
+    // as the cost, and anything that is not a usable integer — including the
+    // `Nil` most clients announce — means "no stamps required".
+    let stamping = match items.get(1) {
         Some(Value::Integer(v)) => match v.as_u64() {
-            Some(cost) if (1..255).contains(&cost) => Some(cost),
-            _ => None,
+            Some(cost) if (1..255).contains(&cost) => Stamping::Required(cost),
+            _ => Stamping::NotRequired,
         },
-        _ => None,
+        _ => Stamping::NotRequired,
     };
 
-    DeliveryAnnounce { name, stamp_cost }
+    DeliveryAnnounce { name, stamping }
 }
 
 #[cfg(test)]
@@ -1081,6 +1292,109 @@ mod tests {
 
     fn addr(b: u8) -> AddressHash {
         AddressHash::new([b; 16])
+    }
+
+    /// Falling behind the announce stream must not end discovery.
+    ///
+    /// The stream is a bounded broadcast channel, and a busy mesh overflows it.
+    /// A receiver that has missed events reports `Lagged`, which a
+    /// `while let Ok(..)` loop reads as end-of-stream — and since the transport
+    /// only emits an announce event when the path improves, the peers' periodic
+    /// re-announces would never restore what was missed.
+    #[tokio::test]
+    async fn falling_behind_the_announce_stream_does_not_end_discovery() {
+        use reticulum_sdk::transport::{Transport, TransportConfig};
+
+        let identity = PrivateIdentity::new_from_rand(&mut UnwrapErr(getrandom::SysRng));
+        let mut transport = Transport::new(TransportConfig::default());
+        let delivery = transport
+            .add_destination(identity.clone(), DestinationName::new("lxmf", "delivery"))
+            .await;
+        let client = Arc::new(LxmfClient::new(
+            Arc::new(transport),
+            identity,
+            delivery,
+            "reticula",
+            Arc::new(std::sync::Mutex::new(MessageStore::new(16))),
+            64,
+        ));
+
+        // A destination that is deliberately not `lxmf/delivery`, so the loop
+        // does no work beyond proving it keeps draining.
+        let other = SingleInputDestination::new(
+            PrivateIdentity::new_from_rand(&mut UnwrapErr(getrandom::SysRng)),
+            DestinationName::new("example_utilities", "noise"),
+        );
+        let event = || AnnounceEvent {
+            destination: Arc::new(Mutex::new(
+                reticulum_sdk::destination::SingleOutputDestination::new_from_desc(
+                    other.desc.clone(),
+                ),
+            )),
+            hops: 1,
+            snr: None,
+            rssi: None,
+            app_data: Default::default(),
+        };
+
+        // Capacity 1, so the second send already overflows the receiver.
+        let (tx, rx) = broadcast::channel::<AnnounceEvent>(1);
+        let watcher = tokio::spawn(async move { client.watch_announces(rx).await });
+        for _ in 0..4 {
+            let _ = tx.send(event());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(
+            !watcher.is_finished(),
+            "discovery must still be running after missing announces"
+        );
+
+        drop(tx);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(watcher.is_finished(), "closing the stream does end discovery");
+    }
+
+    /// A peer that asks us for a path has usually just lost its own entry for
+    /// our delivery destination, so the path response we answer with is all it
+    /// gets to learn us from. If that carried no app data the peer would see an
+    /// unnamed contact, so the default the transport falls back to must be
+    /// exactly what we announce.
+    #[tokio::test]
+    async fn our_path_response_carries_the_same_app_data_as_our_announce() {
+        use reticulum_sdk::transport::{Transport, TransportConfig};
+
+        let identity = PrivateIdentity::new_from_rand(&mut UnwrapErr(getrandom::SysRng));
+        let mut transport = Transport::new(TransportConfig::default());
+        let delivery = transport
+            .add_destination(identity.clone(), DestinationName::new("lxmf", "delivery"))
+            .await;
+        let client = LxmfClient::new(
+            Arc::new(transport),
+            identity,
+            delivery.clone(),
+            "reticula",
+            Arc::new(std::sync::Mutex::new(MessageStore::new(16))),
+            64,
+        );
+
+        client.announce().await;
+
+        let expected = delivery_app_data(Some(&client.display_name()));
+        assert_eq!(
+            delivery.lock().await.default_app_data(),
+            Some(expected.as_slice()),
+            "the path response must carry the same app data as the announce"
+        );
+
+        // A rename has to reach the path response too, not just the next
+        // announce, since `set_display_name` is otherwise purely synchronous.
+        client.set_display_name("renamed");
+        client.announce().await;
+        assert_eq!(
+            delivery.lock().await.default_app_data(),
+            Some(delivery_app_data(Some("renamed")).as_slice()),
+        );
     }
 
     /// Announce app data as the reference encodes it: a msgpack list
@@ -1102,7 +1416,7 @@ mod tests {
         let data = announce_bytes(Some("Reticula"), None);
         let fields = delivery_announce_fields(&data);
         assert_eq!(fields.name.as_deref(), Some("Reticula"));
-        assert_eq!(fields.stamp_cost, None);
+        assert_eq!(fields.stamping, Stamping::NotRequired);
     }
 
     #[test]
@@ -1113,13 +1427,13 @@ mod tests {
         assert_eq!(data[0], 0x93, "must be a msgpack fixarray of 3");
         let fields = delivery_announce_fields(&data);
         assert_eq!(fields.name.as_deref(), Some("rust-interop-peer"));
-        assert_eq!(fields.stamp_cost, Some(8));
+        assert_eq!(fields.stamping, Stamping::Required(8));
     }
 
     #[test]
     fn a_zero_stamp_cost_means_no_stamps_required() {
         let fields = delivery_announce_fields(&announce_bytes(Some("peer"), Some(0)));
-        assert_eq!(fields.stamp_cost, None);
+        assert_eq!(fields.stamping, Stamping::NotRequired);
     }
 
     #[test]
@@ -1128,8 +1442,155 @@ mod tests {
         // stamp required" rather than trusted.
         for cost in [255u64, 1000, u64::from(u32::MAX)] {
             let fields = delivery_announce_fields(&announce_bytes(Some("peer"), Some(cost)));
-            assert_eq!(fields.stamp_cost, None, "cost {cost} must not be honoured");
+            assert_eq!(
+                fields.stamping,
+                Stamping::NotRequired,
+                "cost {cost} must not be honoured"
+            );
         }
+    }
+
+    /// The lookup is bounded: a peer that never answers must not hold a send
+    /// open indefinitely. Measured here rather than through `send`, because a
+    /// send to an unreachable peer then spends far longer retrying the link,
+    /// which would swamp the number this is actually about.
+    #[tokio::test]
+    async fn the_lookup_gives_up_on_a_peer_that_never_answers() {
+        use reticulum_sdk::transport::{Transport, TransportConfig};
+
+        let identity = PrivateIdentity::new_from_rand(&mut UnwrapErr(getrandom::SysRng));
+        let mut transport = Transport::new(TransportConfig::default());
+        let delivery = transport
+            .add_destination(identity.clone(), DestinationName::new("lxmf", "delivery"))
+            .await;
+        let client = LxmfClient::new(
+            Arc::new(transport),
+            identity,
+            delivery,
+            "reticula",
+            Arc::new(std::sync::Mutex::new(MessageStore::new(16))),
+            64,
+        );
+
+        let ghost = addr(9);
+        let started = Instant::now();
+        let cost = client.lookup_stamp_cost(ghost).await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(cost, None, "nobody answered, so no cost was learned");
+        assert!(
+            elapsed >= LOOKUP_TIMEOUT,
+            "it should have waited the full budget, waited {elapsed:?}"
+        );
+        assert!(
+            elapsed < LOOKUP_TIMEOUT * 2,
+            "and no longer: waited {elapsed:?}"
+        );
+    }
+
+    /// A peer that has announced "no stamps required" has answered the question
+    /// and must not be waited on again.
+    #[tokio::test]
+    async fn a_peer_that_has_answered_is_not_asked_again() {
+        use reticulum_sdk::transport::{Transport, TransportConfig};
+
+        let identity = PrivateIdentity::new_from_rand(&mut UnwrapErr(getrandom::SysRng));
+        let mut transport = Transport::new(TransportConfig::default());
+        let delivery = transport
+            .add_destination(identity.clone(), DestinationName::new("lxmf", "delivery"))
+            .await;
+        let client = LxmfClient::new(
+            Arc::new(transport),
+            identity,
+            delivery,
+            "reticula",
+            Arc::new(std::sync::Mutex::new(MessageStore::new(16))),
+            64,
+        );
+
+        let peer = addr(7);
+        client.record_stamp_cost(peer, None).await;
+
+        let started = Instant::now();
+        let cost = client.lookup_stamp_cost(peer).await;
+
+        assert_eq!(cost, None);
+        assert!(
+            started.elapsed() < LOOKUP_TIMEOUT,
+            "an answered peer must not cost a lookup"
+        );
+    }
+
+    #[test]
+    fn an_app_data_less_announce_says_nothing_about_stamping() {
+        let fields = delivery_announce_fields(&[]);
+        assert_eq!(fields.name, None);
+        assert_eq!(fields.stamping, Stamping::Unknown);
+    }
+
+    /// The SDK answers a path request for a destination it owns with an
+    /// app-data-less announce, and the client asks for paths on essentially
+    /// every send to a peer whose destination entry has just been pruned. If
+    /// that silence were read as "no stamps required", the cost learned from
+    /// the peer's real announce would be discarded and the next message would go
+    /// out unstamped and be dropped.
+    #[tokio::test]
+    async fn an_app_data_less_announce_cannot_lower_the_known_cost() {
+        use reticulum_sdk::transport::{Transport, TransportConfig};
+
+        let rt = || {
+            let identity = PrivateIdentity::new_from_rand(&mut UnwrapErr(getrandom::SysRng));
+            (identity, Transport::new(TransportConfig::default()))
+        };
+
+        let (id_a, mut ta) = rt();
+        let delivery_a = ta
+            .add_destination(id_a.clone(), DestinationName::new("lxmf", "delivery"))
+            .await;
+        let client = LxmfClient::new(
+            Arc::new(ta),
+            id_a,
+            delivery_a,
+            "reticula",
+            Arc::new(std::sync::Mutex::new(MessageStore::new(16))),
+            64,
+        );
+
+        let peer = addr(4);
+        assert!(
+            !client.has_announced(peer).await,
+            "a peer we have never heard from is not merely a zero-cost one"
+        );
+
+        // A real announce: the peer demands cost-8 stamps.
+        let known = delivery_announce_fields(&announce_bytes(Some("peer"), Some(8)));
+        assert_eq!(known.stamping, Stamping::Required(8));
+        client.record_stamp_cost(peer, Some(8)).await;
+
+        // Then a path response carrying nothing at all, which must be read as
+        // silence rather than as a downgrade.
+        assert_eq!(
+            delivery_announce_fields(&[]).stamping,
+            Stamping::Unknown
+        );
+        assert_eq!(
+            client.stamp_cost(peer).await,
+            Some(8),
+            "the known cost must survive"
+        );
+
+        // An authoritative "no stamps" still lowers it — but leaves the peer
+        // marked as heard, so a send does not go looking for it again.
+        assert_eq!(
+            delivery_announce_fields(&announce_bytes(Some("peer"), Some(0))).stamping,
+            Stamping::NotRequired
+        );
+        client.record_stamp_cost(peer, None).await;
+        assert_eq!(client.stamp_cost(peer).await, None);
+        assert!(
+            client.has_announced(peer).await,
+            "an answered 'no stamps' must not look like never having heard"
+        );
     }
 
     #[test]
@@ -1137,20 +1598,47 @@ mod tests {
         // Pre-0.5.0 announces carried the bare display name as raw bytes.
         let fields = delivery_announce_fields(b"legacy-node");
         assert_eq!(fields.name.as_deref(), Some("legacy-node"));
-        assert_eq!(fields.stamp_cost, None);
+        assert_eq!(
+            fields.stamping,
+            Stamping::Unknown,
+            "a pre-stamp blob says nothing about stamping"
+        );
     }
 
     #[test]
-    fn an_unusable_announce_yields_nothing_rather_than_panicking() {
+    fn an_undecodable_announce_yields_nothing_rather_than_panicking() {
+        // Nothing usable here, so nothing may be concluded — in particular the
+        // peer must not be assumed not to require stamps.
         for data in [
             &b""[..],
-            &b"\x92"[..],                    // truncated fixarray
-            &b"\xdc\x00"[..],                // truncated array16
-            &b"\x93\xc0\xc0\xc0"[..],         // array of three nils
-            &b"\x93\xa1a\xa1b\xa1c"[..],     // array of three strings
+            &b"\x92"[..],         // truncated fixarray
+            &b"\xdc\x00"[..],     // truncated array16
         ] {
             let fields = delivery_announce_fields(data);
-            assert_eq!(fields.stamp_cost, None, "{data:?} must not yield a cost");
+            assert_eq!(
+                fields.stamping,
+                Stamping::Unknown,
+                "{data:?} must not yield a cost"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_but_decodable_list_still_answers_the_question() {
+        // A current-format list always answers, as the reference reads it: a
+        // cost that is not a usable integer means "no stamps required". These
+        // must be parsed without panicking, whatever the element types are.
+        for data in [
+            &b"\x93\xc0\xc0\xc0"[..],     // array of three nils
+            &b"\x93\xa1a\xa1b\xa1c"[..], // array of three strings
+            &b"\x91\xa1a"[..],             // one-element list
+        ] {
+            let fields = delivery_announce_fields(data);
+            assert_eq!(
+                fields.stamping,
+                Stamping::NotRequired,
+                "{data:?} must read as no stamps required"
+            );
         }
     }
 

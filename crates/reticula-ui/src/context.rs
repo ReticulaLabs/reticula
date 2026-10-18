@@ -24,11 +24,13 @@ pub struct Conversation {
     /// Hop count to this peer's delivery destination, if known.
     pub hops: Option<u8>,
     /// Stamp cost this peer requires from senders, if it announced one.
-    ///
-    /// This client does not implement LXMF stamping, so a peer with a cost
-    /// cannot be sent to — the screen marks it so this is never a surprise
-    /// mid-conversation.
     pub stamp_cost: Option<u64>,
+    /// True when the peer demands more stamping than this client will pay.
+    ///
+    /// A peer *within* the ceiling needs no marking: messages to it are
+    /// stamped automatically. Only a cost we will refuse is worth telling the
+    /// user about, because sending will fail with an explanation.
+    pub stamp_cost_unmet: bool,
 }
 
 /// Delivery state of an outgoing message, as the chat screen shows it.
@@ -62,6 +64,19 @@ pub struct ChatMessage {
     pub title: String,
     pub content: String,
     pub ts: f64,
+}
+
+/// An outbound message is being stamped right now.
+///
+/// LXMF stamps are proof-of-work whose cost the *receiver* sets, so this can
+/// take long enough to look like a hang — especially on a T-Deck. The indicator
+/// exists so the pause reads as "working" rather than "broken".
+#[derive(Debug, Clone, Default)]
+pub struct Stamping {
+    /// Peer the message is being stamped for.
+    pub peer: [u8; 16],
+    /// Stamp cost being satisfied.
+    pub cost: u8,
 }
 
 /// Why the most recent outgoing message could not be delivered.
@@ -132,6 +147,8 @@ pub struct ViewContext<'a> {
     /// Failure of the most recent send, shown on the chat screen it belongs
     /// to. `None` when the last send succeeded or no send has been attempted.
     pub send_failure: Option<&'a SendFailure>,
+    /// Progress of an in-flight stamp, shown on the chat screen it belongs to.
+    pub stamping: Option<&'a Stamping>,
     /// The last fetched NomadNet page, if any.
     pub page: Option<&'a Page>,
     /// Node the currently shown page came from.
